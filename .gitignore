@@ -1,0 +1,50 @@
+# Environment variables
+.env
+
+# Python virtual environment
+myenv/
+myenv311/
+venv/
+env/
+
+# Database files (SENSITIVE - contains candidate data!)
+*.db
+*.sqlite
+*.sqlite3
+
+# Vector store (large files)
+storage/
+chroma_db_700/
+chroma_db/
+
+# Data folders (SENSITIVE - contains PDFs and resumes!)
+downloaded_pdfs/
+data/
+resumedata/
+
+# Results and logs
+agents_results.txt
+search_results.json
+search_results.txt
+diagram.txt
+folder.zip
+
+# Trail/test files
+trail/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

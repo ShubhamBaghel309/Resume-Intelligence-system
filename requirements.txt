@@ -1,0 +1,24 @@
+# Web Framework
+fastapi
+uvicorn[standard]
+
+# LangChain & LLM
+langchain
+langchain-groq
+langchain-community
+langgraph
+
+# Vector Store & Embeddings
+chromadb
+sentence-transformers
+
+# PDF Processing
+pdfplumber
+PyPDF2
+
+# Database
+python-multipart
+
+# Utilities
+pydantic
+python-dotenv
