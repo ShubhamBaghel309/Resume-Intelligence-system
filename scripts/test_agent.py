@@ -11,7 +11,7 @@ print("Creating agent...")
 agent = ResumeIntelligenceAgent()
 
 # Step 3: Ask a simple question
-query = "which candidates have experience with Python and SQL?"
+query = "Show me which candiate has projects in Generative AI and then suggest me some technical questions based on his projects"
 
 print(f"\nAsking: {query}\n")
 

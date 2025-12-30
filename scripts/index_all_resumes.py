@@ -6,7 +6,7 @@ import sqlite3
 import json
 from app.vectorstore.chroma_store import ResumeVectorStore
 from app.vectorstore.embeddings import create_resume_chunks, create_resume_metadata
-from app.models.resume import ParsedResume, WorkExperience, Education
+from app.models.resume import ParsedResume, WorkExperience, Education, Project
 
 DB_PATH = "resumes.db"
 
@@ -22,9 +22,8 @@ cursor = conn.cursor()
 cursor.execute("""
     SELECT 
         pr.resume_id, pr.document_id, pr.candidate_name, pr.email, pr.phone, pr.location,
-        pr.total_experience_years, pr.current_role, pr.technical_skills,
-        pr.programming_languages, pr.frameworks, pr.tools,
-        pr.work_experience, pr.education,
+        pr.total_experience_years, pr.current_role, pr.skills,
+        pr.work_experience, pr.education, pr.projects,
         d.raw_text
     FROM parsed_resumes pr
     JOIN documents d ON pr.document_id = d.document_id
@@ -49,24 +48,22 @@ indexed_count = 0
 
 for row in results:
     (resume_id, document_id, candidate_name, email, phone, location,
-     total_experience_years, current_role, technical_skills_json, 
-     programming_languages_json, frameworks_json, tools_json,
-     work_experience_json, education_json, raw_text) = row
+     total_experience_years, current_role, skills_json,
+     work_experience_json, education_json, projects_json, raw_text) = row
     
     try:
-        # Parse JSON strings
-        technical_skills = json.loads(technical_skills_json) if technical_skills_json else []
-        programming_languages = json.loads(programming_languages_json) if programming_languages_json else []
-        frameworks = json.loads(frameworks_json) if frameworks_json else []
-        tools = json.loads(tools_json) if tools_json else []
+        # Parse JSON strings - single skills column
+        skills = json.loads(skills_json) if skills_json else []
         work_experience_data = json.loads(work_experience_json) if work_experience_json else []
         education_data = json.loads(education_json) if education_json else []
+        projects_data = json.loads(projects_json) if projects_json else []
         
         # Reconstruct Pydantic objects
         work_experience = [WorkExperience(**job) for job in work_experience_data]
         education = [Education(**edu) for edu in education_data]
+        projects = [Project(**proj) for proj in projects_data]
         
-        # Create ParsedResume object
+        # Create ParsedResume object (skills go into technical_skills)
         parsed_resume = ParsedResume(
             candidate_name=candidate_name,
             email=email,
@@ -74,12 +71,13 @@ for row in results:
             location=location,
             total_experience_years=total_experience_years,
             current_role=current_role,
-            technical_skills=technical_skills,
-            programming_languages=programming_languages,
-            frameworks=frameworks,
-            tools=tools,
+            technical_skills=skills,  # All skills merged here
+            programming_languages=[],
+            frameworks=[],
+            tools=[],
             work_experience=work_experience,
-            education=education
+            education=education,
+            projects=projects  # CRITICAL: Include projects for chunking
         )
         
         # Create chunks and metadata
@@ -121,9 +119,9 @@ for query in queries:
         print(f"   Found {len(results['documents'][0])} candidates:\n")
         
         for i, (doc, meta) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
-            print(f"   {i+1}. {meta['candidate_name']}")
-            print(f"      Role: {meta['current_role']}")
-            print(f"      Skills: {meta.get('num_skills', 0)} technical skills")
+            print(f"   {i+1}. {meta.get('candidate_name', 'Unknown')}")
+            print(f"      Role: {meta.get('current_role', meta.get('role', 'Not specified'))}")
+            print(f"      Skills: {meta.get('num_skills', 'N/A')} technical skills")
             print(f"      Relevant text: {doc[:150]}...")
             print()
     else:

@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 DB_PATH = "resumes.db"
-UPLOAD_ROOT = Path("storage/uploads")
+UPLOAD_ROOT = Path("resumedata/resumedata")
 
 
 def create_upload_batch(recruiter_id: str, upload_type: str, total_files: int):

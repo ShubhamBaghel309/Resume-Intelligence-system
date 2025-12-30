@@ -5,33 +5,27 @@ import shutil
 
 DB_PATH = "resumes.db"
 
-print("🗑️ Deleting parsed resumes and resetting document status...")
+print("🗑️ Completely resetting database and ChromaDB...")
 
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
-# 1️⃣ Delete all parsed resumes
-cursor.execute("DELETE FROM parsed_resumes")
-cursor.execute("DELETE FROM DOCUMENTS")
-cursor.execute("DELETE FROM UPLOAD_BATCHES")
-
-# 2️⃣ Reset document status from 'parsed' → 'uploaded'
-# cursor.execute("""
-#     UPDATE documents
-#     SET status = 'uploaded'
-#     WHERE status = 'parsed'
-# """)
+# DROP all tables (so new schema is created fresh)
+cursor.execute("DROP TABLE IF EXISTS parsed_resumes")
+cursor.execute("DROP TABLE IF EXISTS documents")
+cursor.execute("DROP TABLE IF EXISTS upload_batches")
 
 conn.commit()
 conn.close()
 
-print("✅ Parsed resumes deleted")
-print("✅ Document statuses reset to 'uploaded'")
+print("✅ All tables dropped!")
 
-# 3️⃣ Clear ChromaDB (optional but recommended)
+# Clear ChromaDB
 chroma_path = "storage/chroma"
 if os.path.exists(chroma_path):
     shutil.rmtree(chroma_path)
     print("✅ ChromaDB cleared!")
 
-print("\n🎯 NOW RUN: python scripts/process_all_resumes.py")
+print("\n🎯 NOW RUN:")
+print("   1. python app/db/init_db.py")
+print("   2. python scripts/process_all_resumes.py")

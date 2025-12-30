@@ -16,7 +16,7 @@ env/
 storage/
 chroma_db_700/
 chroma_db/
-
+example.en
 # Data folders (SENSITIVE - contains PDFs and resumes!)
 downloaded_pdfs/
 data/

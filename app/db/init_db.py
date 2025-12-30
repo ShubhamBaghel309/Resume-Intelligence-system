@@ -43,8 +43,8 @@ def init_db():
         total_experience_years REAL,
         current_role TEXT,
         
-        -- Skills (JSON array as string: ["Python", "AWS", "GenAI"])
-        technical_skills TEXT,
+        -- Skills (single JSON array with ALL skills merged)
+        skills TEXT,
         
         -- Work Experience (JSON array of job objects)
         work_experience TEXT,
@@ -52,8 +52,12 @@ def init_db():
         -- Education
         education TEXT,
         
+        -- Projects (JSON array of project objects)
+        projects TEXT,
+        
         -- Metadata
         parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        indexed_at TIMESTAMP,
         
         FOREIGN KEY (document_id) REFERENCES documents(document_id)
     )

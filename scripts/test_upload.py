@@ -7,7 +7,7 @@ from app.ingestion.uploader import store_uploaded_pdfs
 import sqlite3
 
 # ✅ Use resumedata folder (19 PDFs)
-PDF_FOLDER = "data"
+PDF_FOLDER = "resumedata/resumedata"
 sample_pdfs = list(Path(PDF_FOLDER).glob("*.pdf"))
 
 print("=" * 70)

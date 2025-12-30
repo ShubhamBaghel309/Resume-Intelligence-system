@@ -45,10 +45,10 @@ class HybridResumeSearch:
             where_clauses.append("total_experience_years >= ?")
             params.append(filters["min_experience"])
         
-        # Filter by skills
+        # Filter by skills (single column now)
         if "skills" in filters:
             for skill in filters["skills"]:
-                where_clauses.append("technical_skills LIKE ?")
+                where_clauses.append("skills LIKE ?")
                 params.append(f"%{skill}%")
         
         # Filter by location

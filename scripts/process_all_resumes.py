@@ -19,7 +19,7 @@ from datetime import datetime
 import time  # ← Add at top of file (line 8)
 
 # ============= CONFIGURATION =============
-PDF_FOLDER = "downloaded_pdfs"
+PDF_FOLDER = "D:/GEN AI internship work/Resume Intelligence System/resumedata/resumedata"
 DB_PATH = "resumes.db"
 VECTOR_STORE_PATH = "storage/chroma"
 
@@ -94,31 +94,47 @@ def parse_all_resumes():
     for i, (doc_id, raw_text, filename) in enumerate(documents, 1):
         print(f"\n[{i}/{len(documents)}] Parsing: {filename[:50]}...")
         
-        try:
-            parsed = parse_resume_with_llm(raw_text)
-            save_parsed_resume(doc_id, parsed)
-            success_count += 1
-            print(f"   ✅ Success! Total: {success_count}/{i}")
-            
-            # ✅ ADD RATE LIMITING HERE:
-            if i % 25 == 0:  # Every 25 requests
-                print("   ⏸️  Rate limit pause (60 sec)...")
-                time.sleep(60)
-            else:
-                time.sleep(2.5)  # Wait 2.5 seconds between requests
+        # Retry with exponential backoff for rate limiting
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                parsed = parse_resume_with_llm(raw_text)
+                save_parsed_resume(doc_id, parsed)
+                success_count += 1
+                print(f"   ✅ Success! Total: {success_count}/{i}")
+                break  # Success, exit retry loop
                 
-        except Exception as e:
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Check if it's a rate limit error
+                if "rate" in error_str or "429" in error_str or "limit" in error_str:
+                    wait_time = 60 * (attempt + 1)  # 60s, 120s, 180s
+                    print(f"   ⏸️  Rate limited! Waiting {wait_time}s (attempt {attempt+1}/{max_retries})...")
+                    time.sleep(wait_time)
+                    continue  # Retry
+                else:
+                    # Non-rate-limit error, fail immediately
+                    failed_count += 1
+                    failed_files.append((filename, str(e)))
+                    print(f"   ❌ Failed: {str(e)[:100]}")
+                    break
+        else:
+            # All retries exhausted
             failed_count += 1
-            failed_files.append((filename, str(e)))
-            print(f"   ❌ Failed: {str(e)[:100]}")
-            time.sleep(5)  # Wait longer after failures
+            failed_files.append((filename, "Rate limit - max retries exceeded"))
+            print(f"   ❌ Rate limit exceeded after {max_retries} retries")
+        
+        # Wait between requests (Groq free tier: 30 req/min = 2s/req minimum)
+        time.sleep(3)  # 3 seconds between requests to stay under limit
     
     # Summary
     print("\n" + "="*70)
     print("📊 PARSING SUMMARY:")
     print(f"   ✅ Successful: {success_count}")
     print(f"   ❌ Failed: {failed_count}")
-    print(f"   📈 Success Rate: {success_count/(success_count+failed_count)*100:.1f}%")
+    if success_count + failed_count > 0:
+        print(f"   📈 Success Rate: {success_count/(success_count+failed_count)*100:.1f}%")
     
     if failed_files:
         print("\n❌ Failed files:")
@@ -169,7 +185,10 @@ def index_all_resumes():
         print(f"\n[{i}/{len(resumes)}] Indexing: {resume_dict['candidate_name']}")
         
         try:
-            # Reconstruct ParsedResume object
+            # Get skills from single column (all merged)
+            skills_list = json.loads(resume_dict['skills']) if resume_dict.get('skills') else []
+            
+            # Reconstruct ParsedResume object (skills go into technical_skills, others empty)
             parsed_resume = ParsedResume(
                 candidate_name=resume_dict['candidate_name'],
                 email=resume_dict.get('email'),
@@ -177,10 +196,10 @@ def index_all_resumes():
                 location=resume_dict.get('location'),
                 total_experience_years=resume_dict.get('total_experience_years'),
                 current_role=resume_dict.get('current_role'),
-                programming_languages=json.loads(resume_dict['programming_languages']) if resume_dict.get('programming_languages') else [],
-                frameworks=json.loads(resume_dict['frameworks']) if resume_dict.get('frameworks') else [],
-                tools=json.loads(resume_dict['tools']) if resume_dict.get('tools') else [],
-                technical_skills=json.loads(resume_dict['technical_skills']) if resume_dict.get('technical_skills') else [],
+                programming_languages=[],  # Not stored separately anymore
+                frameworks=[],
+                tools=[],
+                technical_skills=skills_list,  # All skills merged here
                 work_experience=json.loads(resume_dict['work_experience']) if resume_dict.get('work_experience') else [],
                 education=json.loads(resume_dict['education']) if resume_dict.get('education') else []
             )

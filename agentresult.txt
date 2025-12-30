@@ -1,0 +1,307 @@
+Query: Show me the education background and email of the candidate named Rosy Yuniar
+
+Answer:
+Based on the provided search results, here is the education background and email of the candidate named Rosy Yuniar:
+
+* Education: Bachelor Degree from University of Indonesia
+* Email: rosy_yuniar@yahoo.com
+
+This information is explicitly stated in the resume of Rosy Yuniar, which is Candidate 2 in the search results.
+
+======================================================================
+Query: Show me the education background and email of the candidate named Rosy Yuniar
+
+Answer:
+Based on the provided search results, here is the education background and email of the candidate named Rosy Yuniar:
+
+* Education: Bachelor Degree from University of Indonesia
+* Email: rosy_yuniar@yahoo.com
+
+This information is explicitly stated in the resume of Rosy Yuniar, which is Candidate 2 in the search results.
+
+======================================================================
+Query: which candidates have experience with Python and SQL?
+
+Answer:
+To answer the question of which candidates have experience with Python and SQL, let's examine the provided resumes:
+
+1. **BANDI VINEETHA**: 
+   - Python: Mentioned under "TECHNICAL SKILLS" as one of her skills.
+   - SQL: Mentioned as "Basics of HTML,CSS,SQL" under "TECHNICAL SKILLS" and also has a certification in "My SQL basics".
+
+2. **Rashmi**: 
+   - Python: Not mentioned.
+   - SQL: Not mentioned, but she has experience with RDBMS, which is related to database management systems like SQL.
+
+3. **Revaldy Rahmanda**: 
+   - Python: Not mentioned.
+   - SQL: Not mentioned.
+
+4. **BINEESHA E**: 
+   - Python: Not mentioned.
+   - SQL: Not mentioned.
+
+5. **VIVEK ADSULE**: 
+   - Python: Has a "HackerRank Skills Certification - Python (Basic)" and is learning Python through a course.
+   - SQL: Has a "HackerRank Skills Certification - SQL (Basic)" and mentions MySQL under his skills.
+
+6. **RATISH NAIR**: 
+   - Python: Used Python for building curriculums and analyzing the company's online presence. He also worked on several projects using Python.
+   - SQL: Mentioned under his skills as "SQL".
+
+7. **LAVANYA JAIN**: 
+   - Python: Used Python in several projects, including an expense tracker and a chatbot.
+   - SQL: Mentioned under her skills, specifically "SQL".
+
+8. **NADYA MULIA PUTRI**: 
+   - Python: Mentioned PyTorch, which is a Python library, under her skills.
+   - SQL: Mentioned SQL under her skills.
+
+9. **Y A S H K A D G E**: 
+   - Python: Experienced in Java, but not explicitly mentioned as having Python skills. However, he does mention Data Structures & Algorithms, which could be related to Python programming.
+   - SQL: Mentioned MySQL under his skills.
+
+Based on the information provided in the resumes, the candidates with experience in Python and SQL are:
+
+- **BANDI VINEETHA**
+- **VIVEK ADSULE**
+- **RATISH NAIR**
+- **LAVANYA JAIN**
+- **NADYA MULIA PUTRI**
+
+These candidates have explicitly mentioned Python and SQL (or related technologies like MySQL) in their resumes, indicating they have experience or skills in these areas.
+
+======================================================================
+Query: which candidates have experience with Python and SQL?
+
+Answer:
+To answer the question of which candidates have experience with Python and SQL, let's examine the provided resumes:
+
+1. **BANDI VINEETHA**: 
+   - Python: Mentioned under "TECHNICAL SKILLS" as one of her skills.
+   - SQL: Mentioned as "Basics of HTML,CSS,SQL" under "TECHNICAL SKILLS" and also has a certification in "My SQL basics".
+
+2. **Rashmi**: 
+   - Python: Not mentioned.
+   - SQL: Not mentioned, but she has experience with RDBMS, which is related to database management systems like SQL.
+
+3. **Revaldy Rahmanda**: 
+   - Python: Not mentioned.
+   - SQL: Not mentioned.
+
+4. **BINEESHA E**: 
+   - Python: Not mentioned.
+   - SQL: Not mentioned.
+
+5. **VIVEK ADSULE**: 
+   - Python: Has a "HackerRank Skills Certification - Python (Basic)" and is learning Python through a course.
+   - SQL: Has a "HackerRank Skills Certification - SQL (Basic)" and mentions MySQL under his skills.
+
+6. **RATISH NAIR**: 
+   - Python: Used Python for building curriculums and analyzing the company's online presence. He also worked on several projects using Python.
+   - SQL: Mentioned under his skills as "SQL".
+
+7. **LAVANYA JAIN**: 
+   - Python: Used Python in several projects, including an expense tracker and a chatbot.
+   - SQL: Mentioned under her skills, and she used SQL in her projects.
+
+8. **NADYA MULIA PUTRI**: 
+   - Python: Mentioned PyTorch, which is a Python library, under her skills.
+   - SQL: Mentioned SQL under her skills.
+
+9. **Y A S H K A D G E**: 
+   - Python: Experienced in Java, but not explicitly mentioned as having Python skills. However, he does mention Data Structures & Algorithms, which could be related to Python programming.
+   - SQL: Mentioned MySQL under his skills.
+
+Based on the information provided in the resumes, the candidates with experience in Python and SQL are:
+
+- **BANDI VINEETHA**
+- **VIVEK ADSULE**
+- **RATISH NAIR**
+- **LAVANYA JAIN**
+- **NADYA MULIA PUTRI**
+
+These candidates have explicitly mentioned Python and SQL (or related technologies like MySQL) in their resumes, indicating they have experience or skills in these areas.
+
+======================================================================
+Query: which candidates have technical skills : Python and SQL?
+
+Answer:
+To answer the question about which candidates have technical skills in Python and SQL, let's examine the provided resumes:
+
+1. **P. Omkar Venu Gopal Goud**: This candidate does not explicitly mention Python but has "Basic SQL" listed under SOFTWARE SKILLS.
+
+2. **BANDI VINEETHA**: This candidate mentions "PYTHON" under TECHNICAL SKILLS and "Basics of HTML,CSS,SQL" indicating proficiency in both Python and SQL basics.
+
+3. **Rashmi**: There is no mention of Python or SQL in this candidate's resume.
+
+4. **Revaldy Rahmanda**: This candidate does not mention Python or SQL.
+
+5. **BINEESHA E**: This candidate does not have Python or SQL listed in their skills.
+
+6. **VIVEK ADSULE**: This candidate has "MySQL" listed under skills, which is related to SQL, and has a "HackerRank Skills Certification - Python (Basic)" indicating proficiency in Python.
+
+7. **RATISH NAIR**: This candidate is skilled in "Advanced Python, SQL" and has experience working with these technologies, as evident from the projects described.
+
+8. **LAVANYA JAIN**: This candidate lists "Python" and "SQL" under technical skills and has worked on projects involving these technologies.
+
+9. **NADYA MULIA PUTRI**: This candidate mentions "SQL", "PyTorch" (which is a Python library), indicating proficiency in SQL and Python.
+
+10. **Y A S H K A D G E**: This candidate does not explicitly mention Python but has a focus on Java and Data Structures & Algorithms. There's no mention of SQL.
+
+Based on the information provided in the resumes, the candidates with technical skills in Python and SQL are:
+
+- **BANDI VINEETHA**
+- **VIVEK ADSULE**
+- **RATISH NAIR**
+- **LAVANYA JAIN**
+- **NADYA MULIA PUTRI**
+
+These candidates have explicitly mentioned Python and SQL (or related technologies like MySQL) in their resumes, indicating they possess the required technical skills.
+
+======================================================================
+Query: Name the candidate who has more than 10 years of work experience
+
+Answer:
+Based on the provided resumes, the candidates with more than 10 years of work experience are:
+
+1. **VISHNU** - 11.0 years of experience
+2. **VISHAL SHRIVASTAVA** - 20.0 years of experience
+3. **Zeenat Majeed Lone** - 11.0 years of experience
+4. **Vipin Chahal** - 13.0 years of experience
+5. **YUVRAJ D PATIL** - 15.0 years of experience
+6. **CA VIKASH BESWALA** - 14.0 years of experience
+
+These six candidates have more than 10 years of work experience, with **VISHAL SHRIVASTAVA** having the most experience at 20 years.
+
+======================================================================
+Query: Name the candidate who has more than 10 years of work experience
+
+Answer:
+Based on the provided search results, the candidates with more than 10 years of work experience are:
+
+1. **VISHNU** - 11.0 years of experience
+2. **VISHAL SHRIVASTAVA** - 20.0 years of experience
+3. **Zeenat Majeed Lone** - 11.0 years of experience
+4. **Vipin Chahal** - 13.0 years of experience
+5. **YUVRAJ D PATIL** - 15.0 years of experience
+6. **CA VIKASH BESWALA** - 14.0 years of experience
+
+These six candidates have more than 10 years of work experience, as specified in their resumes. **Vishal Shrivastava** has the most experience with 20 years.
+
+
+
+
+
+======================================================================
+Ouery: Education of candidate named Shubham Baghel
+======================================================================
+✅ FINAL ANSWER:
+======================================================================
+Based on the provided search results,
+
+The college name of **Shubham Baghel** is National Institute of Technology, Kurukshetra, where he pursued B-Tech in Artificial Intelligence and Machine Learning.
+======================================================================
+
+
+
+======================================================================
+query = "Suggest me 5 technical interview questions for Candidate Shubham Baghel based on his technical skills"
+
+These questions are designed to assess Shubham Baghel's technical skills and experience in areas relevant to his resume.
+======================================================================
+Final Answer:
+Based on the provided resume database, I will suggest 5 technical interview questions for Candidate Shubham Baghel.
+
+Since Shubham Baghel has skills in areas like Machine Learning, Deep Learning, Computer Vision, and Data Visualization, the interview questions can be designed to assess his expertise in these areas. Here are five potential questions:
+
+1. **Implementing a Machine Learning Model**: Can you explain how you would implement a machine learning model using PyTorch to solve a real-world problem, such as image classification or object detection?
+2. **Computer Vision**: How would you approach a project that involves detecting and recognizing objects in images using OpenCV and Python? What techniques would you use to improve the accuracy of the model?
+3. **Deep Learning**: Can you describe the architecture of a deep learning model you have worked with in the past, such as a Convolutional Neural Network (CNN) or a Recurrent Neural Network (RNN)? How did you optimize the model's performance?
+4. **Data Visualization**: How would you visualize the results of a machine learning model using data visualization tools like Matplotlib or Seaborn? Can you provide an example of a project where you effectively communicated insights from a complex dataset?
+5. **Generative AI**: Can you explain the concept of Generative Adversarial Networks (GANs) and how you would implement a GAN using TensorFlow or PyTorch to generate synthetic images or data?
+
+These questions are designed to assess Shubham Baghel's technical skills and experience in areas relevant to his resume.
+
+
+======================================================================
+📝 USER QUERY: Show me all the projects of Shubham Baghel
+======================================================================
+
+🧠 QUERY ANALYSIS:
+   Type: name_based
+   Strategy: sql_first
+   Reasoning: The query is asking for projects of a specific person, so we can use SQL to find exact matches for the name and then retrieve the associated projects.
+   Confidence: 0.90
+
+📊 EXECUTING SQL FILTERS...
+   SQL: SELECT resume_id FROM parsed_resumes
+   Params: []
+   ✅ Found 17 candidates via SQL
+
+🔍 EXECUTING VECTOR SEARCH...
+   Filtering to 17 candidates from SQL
+   ✅ Found 10 vector matches
+
+💎 ENRICHING RESULTS...
+   Deduplicated: 10 chunks → 7 unique resumes
+   ✅ Enriched 7 resumes with full data
+
+🤖 GENERATING ANSWER...
+   ✅ Answer generated (1007 chars)
+
+======================================================================
+✅ FINAL ANSWER:
+======================================================================
+Based on the provided search results, the projects of **Shubham Baghel** are:
+
+* **Mini GPT**: Implemented the complete GPT-2 architecture from scratch in PyTorch, including custom tokenizer, embeddings, and dataloader without relying on external libraries. Technologies used: PyTorch, Deep Learning, Transformer Architecture.
+* **Job Ready AI**: Built an intelligent RAG-powered assistant using Llama 3.3 and LangChain to dynamically generate job-tailored resumes aligned with target keywords and JD requirements. Technologies used: Llama 3.3, LangChain, Streamlit.
+* **Stable Diffusion XL Based Facial Aging System**: Developed a generative AI system using Stable Diffusion XL that performs controllable facial aging and rejuvenation by training DreamBooth LoRA models and mixing their weights while keeping identity intact. Technologies used: Generative Deep Learning.
+
+These projects demonstrate **Shubham Baghel**'s skills in areas such as deep learning, natural language processing, and generative AI.
+======================================================================
+
+
+
+======================================================================
+📝 USER QUERY: Show me which candiate has projects in Generative AI and then suggest me some technical questions based on his projects
+======================================================================
+
+🧠 QUERY ANALYSIS:
+   Type: project_based
+   Strategy: vector_first
+   Reasoning: The query requires semantic search to find projects related to Generative AI and then suggest technical questions based on the project details.
+   Confidence: 0.80
+
+📊 SKIPPING SQL (vector-first strategy)
+
+🔍 EXECUTING VECTOR SEARCH...
+   ✅ Found 10 vector matches
+
+💎 ENRICHING RESULTS...
+   Deduplicated: 10 chunks → 5 unique resumes
+   ✅ Enriched 5 resumes with full data
+
+🤖 GENERATING ANSWER...
+   ✅ Answer generated (1655 chars)
+
+======================================================================
+✅ FINAL ANSWER:
+======================================================================
+**Candidate with projects in Generative AI:**
+The candidate with projects in Generative AI is **Shubham Baghel**.
+
+His relevant projects include:
+* **Mini GPT**: Implemented the complete GPT-2 architecture from scratch in PyTorch, including custom tokenizer, embeddings, and dataloader without relying on external libraries.
+* **Stable Diffusion XL Based Facial Aging System**: Developed a generative AI system using Stable Diffusion XL that performs controllable facial aging and rejuvenation by training DreamBooth LoRA models and mixing their weights while keeping identity intact.
+
+**Technical questions based on his projects:**
+
+1. Can you explain the architecture of the GPT-2 model you implemented in PyTorch, and how you handled the custom tokenizer and embeddings?
+2. How did you optimize the performance of your Mini GPT model, and what were some of the challenges you faced during implementation?
+3. In your Stable Diffusion XL Based Facial Aging System, how did you ensure that the identity of the subject was preserved during the aging and rejuvenation process?
+4. Can you walk us through your process of training the DreamBooth LoRA models and mixing their weights in the Stable Diffusion XL system?
+5. How do you think your experience with Generative AI models like GPT-2 and Stable Diffusion XL can be applied to real-world problems, and what potential applications do you see for these technologies?
+
+These questions are designed to assess Shubham's understanding of Generative AI concepts, his experience with implementing complex models, and his ability to think critically about the applications and limitations of these technologies.

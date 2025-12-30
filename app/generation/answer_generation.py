@@ -13,7 +13,7 @@ load_dotenv()
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0.1,  # Slightly creative but factual
-    max_tokens=2048
+    max_tokens=4096
 )
 
 
@@ -31,8 +31,8 @@ def format_resume_for_context(resume_data: dict) -> str:
     if resume_data.get('location'):
         parts.append(f"Location: {resume_data['location']}")
     
-    if resume_data.get('experience_years'):
-        parts.append(f"Experience: {resume_data['experience_years']} years")
+    if resume_data.get('total_experience_years'):
+        parts.append(f"Experience: {resume_data['total_experience_years']} years")
     
     # Contact
     contact_info = []
@@ -44,13 +44,13 @@ def format_resume_for_context(resume_data: dict) -> str:
         parts.append(" | ".join(contact_info))
     
     # Skills
-    if resume_data.get('technical_skills'):
+    if resume_data.get('skills'):
         try:
-            skills = json.loads(resume_data['technical_skills']) if isinstance(resume_data['technical_skills'], str) else resume_data['technical_skills']
+            skills = json.loads(resume_data['skills']) if isinstance(resume_data['skills'], str) else resume_data['skills']
             if skills:
                 parts.append(f"Skills: {', '.join(skills)}")
         except:
-            parts.append(f"Skills: {resume_data['technical_skills']}")
+            parts.append(f"Skills: {resume_data['skills']}")
     
     # Work experience
     if resume_data.get('work_experience'):
@@ -74,10 +74,30 @@ def format_resume_for_context(resume_data: dict) -> str:
         except:
             pass
     
-    # Add full resume text for detailed queries
-    if resume_data.get('raw_text'):
-        parts.append("\n=== FULL RESUME CONTENT ===")
-        parts.append(resume_data['raw_text'][:2000])  # First 2000 chars
+    # Projects (CRITICAL: This was missing!)
+    if resume_data.get('projects'):
+        try:
+            projects = json.loads(resume_data['projects']) if isinstance(resume_data['projects'], str) else resume_data['projects']
+            if projects:
+                parts.append("\nProjects:")
+                for proj in projects:
+                    proj_name = proj.get('name', 'Unnamed Project')
+                    proj_desc = proj.get('description', 'No description')
+                    proj_tech = proj.get('technologies', [])
+                    
+                    parts.append(f"  • {proj_name}")
+                    parts.append(f"    Description: {proj_desc}")
+                    if proj_tech:
+                        tech_str = ', '.join(proj_tech) if isinstance(proj_tech, list) else proj_tech
+                        parts.append(f"    Technologies: {tech_str}")
+                    if proj.get('role'):
+                        parts.append(f"    Role: {proj.get('role')}")
+        except Exception as e:
+            # If projects parsing fails, at least try to show raw data
+            parts.append(f"\nProjects: {resume_data.get('projects', 'Error parsing projects')}")
+    
+    # NOTE: raw_text removed from context - it was overwhelming LLM
+    # The structured fields above (skills, work_experience, education, projects) are sufficient
     
     return "\n".join(parts)
 
