@@ -33,7 +33,7 @@ Unlike a simple search system that always does the same thing, this agent:
 - ✅ **Adapts** its strategy based on the query type
 - ✅ **Combines** SQL (structured) and Vector (semantic) search
 - ✅ **Retries** with different strategies if needed
-- ✅ **Optimizes** for performance (crucial with 17,000+ candidates)
+- ✅ **Optimizes** for performance (crucial with 1000+ candidates)
 
 ---
 
