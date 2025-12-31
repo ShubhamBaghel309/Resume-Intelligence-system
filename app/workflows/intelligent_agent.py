@@ -100,44 +100,45 @@ def analyze_query_node(state: AgentState) -> AgentState:
 
 Your task:
 1. Identify query type (name-based, skill-based, experience-based, etc.)
-2. Extract structured entities (names, skills, locations, experience years, etc.)
-3. Recommend search strategy:
-   - "sql_first": Use SQL to find exact matches (names, locations), then vector search if needed
-   - "vector_first": Use semantic search for skills, projects, complex criteria
-   - "hybrid": Combine SQL filtering + vector ranking for multi-criteria queries
-   - "sql_only": Pure SQL for simple structured queries
-
-CRITICAL: When extracting entities, be very precise:
-- "names": List of candidate names mentioned (e.g., ["Shubham Baghel", "John Smith"])
-- "skills": List of technical skills (e.g., ["Python", "Machine Learning"])
-- "location": Location mentioned (e.g., "Bangalore")
-- "companies": Company names (e.g., ["Google", "Microsoft"])
+2. Extract structured entities into the 'entities' dict:
+   - names: List of candidate names (e.g., ["Shubham Baghel"])
+   - skills: List of technical skills (e.g., ["Python", "Machine Learning"])
+   - location: Location string (e.g., "Bangalore")
+   - companies: List of company names (e.g., ["Google"])
+3. Extract filters into the 'filters' dict:
+   - min_experience: Minimum years (e.g., 5)
+   - max_experience: Maximum years
+   - required_skills: List of must-have skills
+   - job_title: Job role/title (e.g., "DATA SCIENTIST", "Software Engineer")
+   - company: Company name (e.g., "WHITEHAT JR", "Google")
+   - current_role: Current job title
+4. Recommend search strategy:
+   - "sql_first": For name-based or exact match queries
+   - "vector_first": For semantic/project-based queries
+   - "hybrid": For multi-criteria queries
+   - "sql_only": For simple structured queries
 
 Examples:
 
 Query: "Find Anshika Chaudhary's education"
 → Type: name_based, Strategy: sql_first
-→ Entities: {"names": ["Anshika Chaudhary"]}
+→ Extract "Anshika Chaudhary" into entities.names
 
 Query: "Show me all projects of Shubham Baghel"
 → Type: name_based, Strategy: sql_first
-→ Entities: {"names": ["Shubham Baghel"]}
+→ Extract "Shubham Baghel" into entities.names
+
+Query: "What is the educational background of the candidate who worked as a DATA SCIENTIST at WHITEHAT JR?"
+→ Type: experience_based, Strategy: hybrid
+→ Extract "DATA SCIENTIST" into filters.job_title and "WHITEHAT JR" into filters.company
 
 Query: "Python developers with 5+ years experience"  
-→ Type: skill_based + experience_based, Strategy: hybrid
-→ Entities: {"skills": ["Python"]}, Filters: {"min_experience": 5}
+→ Type: skill_based, Strategy: hybrid
+→ Extract "Python" into entities.skills and 5 into filters.min_experience
 
-Query: "Who worked on RAG projects?"
-→ Type: project_based, Strategy: vector_first
-→ Entities: {"skills": ["RAG"]}
-
-Query: "Compare Machine Learning engineers in Bangalore"
-→ Type: complex_multi_criteria, Strategy: hybrid
-→ Entities: {"skills": ["Machine Learning"], "location": "Bangalore"}
-
-Be intelligent - choose the strategy that will give BEST results, not just fastest."""),
+Be intelligent - choose the strategy that will give BEST results."""),
         
-        ("user", "Query: {query}\n\nAnalyze this query and recommend the best search strategy. IMPORTANT: Extract all candidate names into the 'entities' field.")
+        ("user", "Query: {query}\n\nAnalyze this query. Extract candidate names into entities.names, and job titles/companies into filters.")
     ])
     
     chain = analysis_prompt | llm.with_structured_output(QueryAnalysis)
@@ -218,6 +219,24 @@ def sql_filter_node(state: AgentState) -> AgentState:
             skill_conditions.append("skills LIKE ?")
             params.append(f"%{skill}%")
         where_clauses.append(f"({' OR '.join(skill_conditions)})")
+    
+    # Job title filter (searches in work_experience JSON and current_role)
+    if filters.get("job_title"):
+        job_title = filters["job_title"]
+        # Search in both work_experience JSON and current_role column
+        where_clauses.append("(work_experience LIKE ? OR current_role LIKE ?)")
+        params.append(f"%{job_title}%")
+        params.append(f"%{job_title}%")
+    
+    # Company filter (searches in work_experience JSON)
+    if filters.get("company"):
+        where_clauses.append("work_experience LIKE ?")
+        params.append(f"%{filters['company']}%")
+    
+    # Current role filter (exact match in current_role column)
+    if filters.get("current_role"):
+        where_clauses.append("current_role LIKE ?")
+        params.append(f"%{filters['current_role']}%")
     
     # Build final query
     sql = "SELECT resume_id FROM parsed_resumes"
