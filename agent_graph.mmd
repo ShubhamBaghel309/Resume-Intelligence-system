@@ -1,0 +1,25 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	analyze_query(analyze_query)
+	sql_filter(sql_filter)
+	llm_sql_generation(llm_sql_generation)
+	vector_search(vector_search)
+	enrich_results(enrich_results)
+	generate_answer(generate_answer)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> analyze_query;
+	analyze_query --> sql_filter;
+	enrich_results --> generate_answer;
+	generate_answer -. &nbsp;end&nbsp; .-> __end__;
+	generate_answer -. &nbsp;retry&nbsp; .-> sql_filter;
+	llm_sql_generation --> vector_search;
+	sql_filter --> llm_sql_generation;
+	vector_search --> enrich_results;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
