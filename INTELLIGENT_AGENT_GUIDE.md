@@ -176,6 +176,130 @@ def analyze_query_node(state: AgentState) -> AgentState:
     """
 ```
 
+#### The QueryAnalysis Model (CRITICAL!)
+
+This is the **brain's output format** - a Pydantic model that structures the LLM's understanding:
+
+```python
+class QueryAnalysis(BaseModel):
+    """Structured output from query analyzer"""
+    
+    # 1. QUERY TYPE - What kind of question is this?
+    query_type: Literal[
+        "name_based",              # "Show Shubham's projects"
+        "skill_based",             # "Find Python developers"
+        "experience_based",        # "Candidates with 10+ years"
+        "project_based",           # "Who built RAG systems?"
+        "education_based",         # "Find PhDs in ML"
+        "location_based",          # "Candidates in India"
+        "complex_multi_criteria"   # "Python devs in India with 5+ years"
+    ] = Field(description="Primary type of the query")
+    
+    # 2. INTENT - What does the user want?
+    intent: str = Field(
+        description="What the user wants to know (e.g., 'find candidates', 'get education details', 'compare candidates')"
+    )
+    # Examples:
+    # - "find candidates matching criteria"
+    # - "get specific information about a candidate"
+    # - "compare multiple candidates"
+    # - "list all projects of a candidate"
+    
+    # 3. ENTITIES - Extracted nouns/concepts
+    entities: dict = Field(
+        description="Extracted entities: names, skills, companies, locations, degrees, etc."
+    )
+    # Example:
+    # {
+    #   "names": ["Shubham Baghel", "RATISH NAIR"],
+    #   "skills": ["Python", "Machine Learning"],
+    #   "companies": ["WHITEHAT JR", "Google"],
+    #   "location": "India"
+    # }
+    
+    # 4. FILTERS - Structured constraints for SQL
+    filters: dict = Field(
+        description="Structured filters: min_experience, max_experience, location, required_skills, job_title, company, etc."
+    )
+    # Example:
+    # {
+    #   "min_experience": 5,
+    #   "max_experience": 10,
+    #   "location": "Bangalore",
+    #   "required_skills": ["Python", "SQL"],
+    #   "job_title": "DATA SCIENTIST",
+    #   "company": "WHITEHAT JR"
+    # }
+    
+    # 5. SEARCH STRATEGY - How to search?
+    search_strategy: Literal[
+        "sql_first",      # SQL filter by name/location, then vector search
+        "vector_first",   # Semantic search first, no SQL filtering
+        "hybrid",         # SQL filters + vector search combined
+        "sql_only"        # Only SQL, skip vector search
+    ] = Field(description="Recommended search strategy based on query analysis")
+    
+    # 6. CONFIDENCE - How sure is the LLM?
+    confidence: float = Field(
+        description="Confidence in the analysis (0.0 to 1.0)",
+        ge=0.0,  # Greater than or equal to 0
+        le=1.0   # Less than or equal to 1
+    )
+    # 0.9-1.0: Very confident (clear query)
+    # 0.7-0.9: Confident (standard query)
+    # 0.5-0.7: Moderate (ambiguous query)
+    # <0.5: Low confidence (unclear query)
+    
+    # 7. REASONING - Why this strategy?
+    reasoning: str = Field(
+        description="Brief explanation of why this strategy was chosen"
+    )
+    # Example: "Name-based query with exact match, so sql_first is most efficient"
+```
+
+**Why Pydantic?**
+
+1. **Type Safety:** LLM must return exact structure
+2. **Validation:** Automatic validation of fields (e.g., confidence must be 0-1)
+3. **Documentation:** Field descriptions guide the LLM
+4. **Parsing:** Easy to convert LLM output to Python objects
+
+**How LLM Uses This:**
+
+```python
+# LLM sees the Pydantic schema and generates JSON matching it
+chain = prompt | llm.with_structured_output(QueryAnalysis)
+
+# LLM output (JSON):
+{
+  "query_type": "experience_based",
+  "intent": "find candidate's education",
+  "entities": {},
+  "filters": {
+    "job_title": "DATA SCIENTIST",
+    "company": "WHITEHAT JR"
+  },
+  "search_strategy": "hybrid",
+  "confidence": 0.80,
+  "reasoning": "Experience-based query needs SQL for job filtering + vector for semantic matching"
+}
+
+# Automatically parsed to QueryAnalysis object:
+analysis = QueryAnalysis(
+    query_type="experience_based",
+    intent="find candidate's education",
+    entities={},
+    filters={"job_title": "DATA SCIENTIST", "company": "WHITEHAT JR"},
+    search_strategy="hybrid",
+    confidence=0.80,
+    reasoning="Experience-based query needs SQL for job filtering + vector for semantic matching"
+)
+
+# Now we can use it:
+state["search_strategy"] = analysis.search_strategy  # "hybrid"
+state["sql_filters"] = analysis.filters  # {"job_title": "DATA SCIENTIST", ...}
+```
+
 #### How it Works:
 
 1. **Prompt Engineering:**
@@ -379,18 +503,18 @@ def vector_search_node(state: AgentState) -> AgentState:
 ```mermaid
 graph LR
     A[Query Text] --> B[Embedding Model]
-    B --> C[Query Vector<br/>[0.234, -0.567, ...]]
+    B --> C[Query Vector]
     
-    D[Resume Chunks<br/>in Vector DB] --> E[Chunk Vectors]
+    D[Resume Chunks in Vector DB] --> E[Chunk Vectors]
     
     C --> F[Cosine Similarity]
     E --> F
     
-    F --> G[Top 10 Most<br/>Similar Chunks]
+    F --> G[Top 10 Most Similar Chunks]
     
     H[SQL Candidate IDs] --> I{Filter?}
-    I -->|Yes| J[Only search<br/>these candidates]
-    I -->|No| K[Search all<br/>candidates]
+    I -->|Yes| J[Only search these candidates]
+    I -->|No| K[Search all candidates]
     
     J --> F
     K --> F
@@ -651,7 +775,7 @@ graph TD
     A[Generate Answer] --> B{Results Found?}
     B -->|Yes| C[Return Answer]
     B -->|No| D{Retry Count < 1?}
-    D -->|No| E[Return "No results"]
+    D -->|No| E[Return No Results Message]
     D -->|Yes| F[Increment Retry Count]
     F --> G[Switch Strategy]
     G --> H[Enable LLM SQL]
