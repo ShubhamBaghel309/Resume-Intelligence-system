@@ -5,6 +5,7 @@ uvicorn[standard]
 # LangChain & LLM
 langchain
 langchain-groq
+langchain-google-genai
 langchain-community
 langgraph
 
@@ -22,3 +23,4 @@ python-multipart
 # Utilities
 pydantic
 python-dotenv
+python-dateutil

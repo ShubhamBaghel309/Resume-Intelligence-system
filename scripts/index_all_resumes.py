@@ -23,7 +23,7 @@ cursor.execute("""
     SELECT 
         pr.resume_id, pr.document_id, pr.candidate_name, pr.email, pr.phone, pr.location,
         pr.total_experience_years, pr.current_role, pr.skills,
-        pr.work_experience, pr.education, pr.projects,
+        pr.work_experience, pr.education, pr.projects, pr.additional_information,
         d.raw_text
     FROM parsed_resumes pr
     JOIN documents d ON pr.document_id = d.document_id
@@ -49,7 +49,7 @@ indexed_count = 0
 for row in results:
     (resume_id, document_id, candidate_name, email, phone, location,
      total_experience_years, current_role, skills_json,
-     work_experience_json, education_json, projects_json, raw_text) = row
+     work_experience_json, education_json, projects_json, additional_info, raw_text) = row
     
     try:
         # Parse JSON strings - single skills column
@@ -63,7 +63,7 @@ for row in results:
         education = [Education(**edu) for edu in education_data]
         projects = [Project(**proj) for proj in projects_data]
         
-        # Create ParsedResume object (skills go into technical_skills)
+        # Create ParsedResume object (with additional_information)
         parsed_resume = ParsedResume(
             candidate_name=candidate_name,
             email=email,
@@ -77,7 +77,8 @@ for row in results:
             tools=[],
             work_experience=work_experience,
             education=education,
-            projects=projects  # CRITICAL: Include projects for chunking
+            projects=projects,
+            additional_information=additional_info  # NEW
         )
         
         # Create chunks and metadata

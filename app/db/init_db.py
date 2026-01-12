@@ -10,7 +10,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS upload_batches (
         batch_id TEXT PRIMARY KEY,
         recruiter_id TEXT,
-        upload_type TEXT,
+        upload_type pdf,
         total_files INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )

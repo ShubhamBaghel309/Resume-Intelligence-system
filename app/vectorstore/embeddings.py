@@ -161,10 +161,112 @@ def create_resume_chunks(parsed_resume: ParsedResume, raw_text: str = None) -> L
             }
         })
     
-    # NOTE: Skills and Education are NOT chunked - they're in SQL
-    # NOTE: Full raw text is NOT chunked - prevents overwhelming LLM
+    
+    # =========================================================================
+    # Chunk N: Additional Information (Catch-all for uncategorized content)
+    # =========================================================================
+    # Purpose: Capture achievements, certifications, courses, publications, awards, etc.
+    # This handles resume sections not covered by structured chunks
+    
+    if raw_text:
+        additional_info = extract_additional_info(raw_text, parsed_resume.candidate_name)
+        if additional_info:
+            chunks.append({
+                "type": "additional_info",
+                "text": additional_info,
+                "metadata": {
+                    "chunk_type": "additional_info",
+                    "candidate_name": parsed_resume.candidate_name
+                }
+            })
+    
+    # NOTE: Skills and Education are NOT chunked separately - they're in SQL
+    # NOTE: The full_resume chunk ensures NOTHING is missed (achievements, awards, references, etc.)
     
     return chunks
+
+
+def extract_additional_info(raw_text: str, candidate_name: str) -> str:
+    """
+    Extract ALL miscellaneous content from resume not covered by structured chunks
+    
+    Strategy: Take the full raw_text and create a comprehensive additional_info chunk
+    This ensures NOTHING is missed (interests, certifications, coding platforms, hobbies, etc.)
+    """
+    
+    if not raw_text or len(raw_text.strip()) < 50:
+        return None
+    
+    # Clean up the raw text
+    lines = raw_text.split('\n')
+    cleaned_lines = []
+    
+    # Sections to SKIP (already in structured chunks)
+    skip_section_keywords = [
+        "work experience", "employment history", "professional experience", "experience",
+        "education", "academic background", "qualifications",
+        "projects", "personal projects", "academic projects", "project"
+    ]
+    
+    # Keywords for sections we WANT to keep
+    keep_section_keywords = [
+        "skill", "certification", "certificate", "award", "achievement",
+        "honor", "recognition", "course", "training", "publication",
+        "patent", "volunteer", "language", "interest", "hobby",
+        "reference", "coding", "platform", "profile"
+    ]
+    
+    skip_mode = False
+    last_was_section_header = False
+    
+    for line in lines:
+        line_stripped = line.strip()
+        line_lower = line_stripped.lower()
+        
+        # Skip empty lines in skip mode
+        if not line_stripped:
+            if not skip_mode:
+                cleaned_lines.append("")  # Preserve spacing
+            continue
+        
+        # Check if this is a section header we should skip
+        is_skip_section = any(keyword in line_lower for keyword in skip_section_keywords)
+        
+        # Section headers are SHORT (< 40 chars), ALL CAPS or title case, and may end with colon
+        is_likely_section_header = (
+            len(line_stripped) < 40 and
+            (line_stripped.isupper() or 
+             line_stripped.istitle() or
+             line_stripped.endswith(':'))
+        )
+        
+        if is_skip_section and is_likely_section_header:
+            # Entering a section we already have in structured chunks
+            skip_mode = True
+            continue
+        
+        # Check if this is a section we want to KEEP
+        is_keep_section = any(keyword in line_lower for keyword in keep_section_keywords)
+        
+        if is_keep_section and is_likely_section_header:
+            skip_mode = False  # Start capturing
+            # Add section header with formatting
+            cleaned_lines.append(f"\n**{line_stripped}**")
+            last_was_section_header = True
+            continue
+        
+        # Capture line if not in skip mode
+        if not skip_mode:
+            cleaned_lines.append(line_stripped)
+            last_was_section_header = False
+    
+    # Join and create the additional info chunk
+    if cleaned_lines:
+        additional_text = f"Additional Information for {candidate_name}:\n\n" + "\n".join(cleaned_lines)
+        # NO TRUNCATION - capture everything (References, Interests are usually at the end)
+        return additional_text
+    
+    return None
 
 
 def create_resume_metadata(parsed_resume: ParsedResume, document_id: str, resume_id: str) -> Dict:

@@ -27,7 +27,7 @@ cursor.execute("""
     LIMIT 1
 """)
 
-result = cursor.fetchone()
+result = cursor.fetchall()
 conn.close()
 
 if not result:

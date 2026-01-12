@@ -9,7 +9,7 @@ sys.path.insert(0, '.')
 
 from app.vectorstore.chroma_store import ResumeVectorStore
 
-def query_vectorstore(query: str, top_k: int = 5, filters: dict = None):
+def query_vectorstore(query: str, top_k: int = 5, filters: dict = None, show_full: bool = False):
     """
     Query the vector store and display results
     
@@ -17,6 +17,7 @@ def query_vectorstore(query: str, top_k: int = 5, filters: dict = None):
         query: Search query text
         top_k: Number of results to return
         filters: Optional ChromaDB filters (e.g., {"resume_id": {"$in": [...]}})
+        show_full: Show full content instead of preview
     """
     
     print("="*70)
@@ -26,6 +27,8 @@ def query_vectorstore(query: str, top_k: int = 5, filters: dict = None):
     print(f"Top K: {top_k}")
     if filters:
         print(f"Filters: {filters}")
+    if show_full:
+        print(f"Show Full Content: True")
     print()
     
     # Initialize vector store
@@ -63,8 +66,13 @@ def query_vectorstore(query: str, top_k: int = 5, filters: dict = None):
         print(f"Candidate: {metadata.get('candidate_name', 'Unknown')}")
         print(f"Chunk Type: {metadata.get('chunk_type', 'Unknown')}")
         print(f"Resume ID: {metadata.get('resume_id', 'Unknown')[:8]}...")
-        print(f"\nContent Preview (first 300 chars):")
-        print(f"{document[:300]}...")
+        
+        if show_full:
+            print(f"\nFull Content:")
+            print(document)
+        else:
+            print(f"\nContent Preview (first 500 chars):")
+            print(f"{document[:]}...")
         print()
 
 
@@ -144,6 +152,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Query ChromaDB Vector Store")
     parser.add_argument("--query", "-q", type=str, help="Search query")
     parser.add_argument("--top-k", "-k", type=int, default=5, help="Number of results")
+    parser.add_argument("--full", "-f", action="store_true", help="Show full content instead of preview")
     parser.add_argument("--inspect", "-i", type=str, help="Inspect specific candidate")
     parser.add_argument("--list", "-l", action="store_true", help="List all candidates")
     
@@ -154,7 +163,7 @@ if __name__ == "__main__":
     elif args.inspect:
         inspect_candidate(args.inspect)
     elif args.query:
-        query_vectorstore(args.query, args.top_k)
+        query_vectorstore(args.query, args.top_k, show_full=args.full)
     else:
         # Interactive mode
         print("\n" + "="*70)

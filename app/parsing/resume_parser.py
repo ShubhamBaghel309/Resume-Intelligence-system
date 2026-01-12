@@ -4,6 +4,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import PromptTemplate
 from app.models.resume import ParsedResume
+from app.utils.experience_calculator import calculate_years_of_experience
 import uuid
 import json
 import os
@@ -35,20 +36,32 @@ parser = PydanticOutputParser(pydantic_object=ParsedResume)
 prompt = PromptTemplate(
     template="""You are a resume parsing assistant. Extract structured information from the following resume text.
 
-IMPORTANT - Categorize technical skills precisely:
+IMPORTANT - Categorize ALL skills (technical AND soft skills):
 - programming_languages: Python, Java, C++, JavaScript, SQL, etc.
 - frameworks: PyTorch, TensorFlow, React, Django, FastAPI, LangChain, Hugging Face, Scikit-learn, OpenCV, etc.
 - tools: VS Code, GitHub, Docker, AWS, Azure, Postman, Jupyter, Google Colab, Ollama, etc.
-- technical_skills: Any other technical competencies (databases, methodologies, domains, etc.)
+- technical_skills: ANY other competencies including:
+  * Technical: Databases, methodologies, domains, testing, DevOps, etc.
+  * Soft Skills: Communication, Leadership, Teamwork, Problem-solving, Time management, etc.
+  * Business: Project management, Agile, Scrum, Stakeholder management, etc.
+  * Domain: Finance, Healthcare, E-commerce, etc.
+  * Languages: English, Spanish, Hindi, etc.
+  * ANY skill mentioned in the resume that doesn't fit the above 3 categories
 
 WORK EXPERIENCE:
 - Extract start_date and end_date separately (e.g., "January 2021", "Present")
 - Extract responsibilities as a list
+- If total_experience_years is not explicitly mentioned, leave it as null (we'll calculate it)
 
 PROJECTS:
 - Extract all projects mentioned (personal, academic, professional)
 - For each project: name, description, technologies used, duration (if mentioned), role
 - Look for sections like "Projects", "Side Projects", "Academic Projects", "Portfolio"
+
+ADDITIONAL INFORMATION:
+- Extract any other sections not covered above into the "additional_information" field
+- This includes: Achievements, Awards, Publications, References, Certifications, Volunteer Work, Languages, Hobbies, Patents, etc.
+- Preserve the section structure (e.g., "Achievements: ... Awards: ... References: ...")
 
 Extract ALL skills and projects mentioned in the resume, not just the top few.
 
@@ -125,8 +138,14 @@ def parse_resume_with_llm(raw_text: str, max_retries: int = 5) -> ParsedResume:
 def save_parsed_resume(document_id: str, parsed_resume: ParsedResume) -> str:
     """Save parsed resume data to database and update document status"""
     
-    
     resume_id = str(uuid.uuid4())
+    
+    # Auto-calculate total_experience_years if LLM didn't provide it
+    if parsed_resume.total_experience_years is None or parsed_resume.total_experience_years == 0:
+        calculated_years = calculate_years_of_experience(parsed_resume.work_experience)
+        if calculated_years:
+            parsed_resume.total_experience_years = calculated_years
+            print(f"   📊 Auto-calculated experience: {calculated_years} years")
     
     # Merge all skill categories into single list (deduplicated)
     all_skills = list(set(
@@ -145,13 +164,13 @@ def save_parsed_resume(document_id: str, parsed_resume: ParsedResume) -> str:
     conn = sqlite3.connect("resumes.db")
     cursor = conn.cursor()
     
-    # Insert parsed resume data with merged skills and projects
+    # Insert parsed resume data with additional_information field
     cursor.execute("""
         INSERT INTO parsed_resumes (
             resume_id, document_id, candidate_name, email, phone, location,
             total_experience_years, current_role, skills,
-            work_experience, education, projects
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            work_experience, education, projects, additional_information
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         resume_id,
         document_id,
@@ -164,7 +183,8 @@ def save_parsed_resume(document_id: str, parsed_resume: ParsedResume) -> str:
         skills_json,
         work_json,
         education_json,
-        projects_json
+        projects_json,
+        parsed_resume.additional_information  # NEW
     ))
     
     # Update document status from 'extracted' to 'parsed'

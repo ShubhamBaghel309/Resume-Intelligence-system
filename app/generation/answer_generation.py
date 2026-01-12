@@ -6,19 +6,37 @@ import os
 import json
 from dotenv import load_dotenv
 
-# Initialize Groq LLM
+# Initialize LLMs
 load_dotenv()
 # API key loaded from .env file
 
-llm = ChatGroq(
+# Primary LLM: Groq (fast, 128K context)
+llm_groq = ChatGroq(
     model="llama-3.3-70b-versatile",
-    temperature=0.1,  # Slightly creative but factual
+    temperature=0.1,
     max_tokens=4096
 )
 
+# Fallback LLM: Gemini (2M context, no rate limits)
+from langchain_google_genai import ChatGoogleGenerativeAI
+llm_gemini = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
+    temperature=0.1,
+    max_tokens=4096
+)
 
-def format_resume_for_context(resume_data: dict) -> str:
-    """Convert resume data into readable text for LLM context"""
+# Default to Groq
+llm = llm_groq
+
+
+def format_resume_for_context(resume_data: dict, include_full_text: bool = False) -> str:
+    """
+    Convert resume data into readable text for LLM context
+    
+    Args:
+        resume_data: Resume dict from database
+        include_full_text: If True, includes complete raw_text (for specific candidate queries)
+    """
     
     parts = []
     
@@ -96,8 +114,35 @@ def format_resume_for_context(resume_data: dict) -> str:
             # If projects parsing fails, at least try to show raw data
             parts.append(f"\nProjects: {resume_data.get('projects', 'Error parsing projects')}")
     
-    # NOTE: raw_text removed from context - it was overwhelming LLM
-    # The structured fields above (skills, work_experience, education, projects) are sufficient
+    # ✅ FIX: Include matched vector chunks (project details, achievements, etc.)
+    if resume_data.get('matched_chunks'):
+        print(f"   🔍 DEBUG: Found {len(resume_data['matched_chunks'])} matched chunks for {resume_data.get('candidate_name')}")
+        parts.append("\n--- Matched Content from Vector Search ---")
+        for chunk in resume_data['matched_chunks']:
+            chunk_type = chunk.get('chunk_type', 'unknown')
+            chunk_text = chunk.get('chunk_text', '')
+            if chunk_text:
+                print(f"      - Including {chunk_type} chunk ({len(chunk_text)} chars)")
+                parts.append(f"\n[{chunk_type.upper()}]")
+                parts.append(chunk_text)  # NO TRUNCATION - include full content
+    else:
+        print(f"   ⚠️  DEBUG: No matched_chunks found for {resume_data.get('candidate_name')}")
+    
+    # ✅ CRITICAL FIX: Include full raw_text for comprehensive coverage
+    # This ensures the LLM can answer questions about:
+    # - Languages, Driving License, Hobbies, Interests
+    # - References, Publications, Patents
+    # - Certifications, Awards, Honors
+    # - Coding platforms (LeetCode, Codeforces, etc.)
+    # - ANY other resume section not in structured fields
+    # 
+    # NOTE: Only include for specific candidate queries (1-2 candidates)
+    # to avoid overwhelming the LLM with too much text
+    if include_full_text and resume_data.get('raw_text'):
+        raw_text = resume_data['raw_text']
+        print(f"   📄 Including full raw_text ({len(raw_text)} chars)")
+        parts.append("\n--- COMPLETE RESUME TEXT ---")
+        parts.append(raw_text)
     
     return "\n".join(parts)
 
@@ -119,9 +164,18 @@ def generate_answer(query: str, search_results: list, conversation_history: list
     if not search_results:
         return "I couldn't find any candidates matching your criteria. Try broadening your search or adjusting the filters."
     
+    # ✅ Smart decision: Include full raw_text ONLY for specific queries (1-2 candidates)
+    # For broader searches (3+ candidates), rely on structured fields + matched_chunks
+    include_full_text = len(search_results) <= 2
+    
+    if include_full_text:
+        print(f"   📋 Including FULL resume text for {len(search_results)} candidate(s)")
+    else:
+        print(f"   📋 Using structured fields only for {len(search_results)} candidates")
+    
     context_parts = []
     for i, resume in enumerate(search_results, 1):
-        formatted = format_resume_for_context(resume)
+        formatted = format_resume_for_context(resume, include_full_text=include_full_text)
         context_parts.append(f"\n--- Candidate {i} ---\n{formatted}")
     
     context = "\n".join(context_parts)
@@ -162,8 +216,20 @@ CRITICAL RULES (NON-NEGOTIABLE)
 - NEVER infer, guess, assume, or hallucinate details
 - NEVER merge information from multiple resumes into one candidate
 
+────────────────────────────────DATA SOURCES - USE ALL AVAILABLE
 ────────────────────────────────
-RESPONSE FORMAT GUIDELINES
+You will receive resume data in multiple formats:
+1. **Structured Fields**: skills, work_experience, education, projects (parsed)
+2. **Matched Chunks**: Relevant sections from vector search
+3. **Complete Resume Text**: Full raw resume (for specific queries)
+
+**CRITICAL:** Always check ALL provided sections before saying "not specified":
+- Check structured fields first
+- Then check "Matched Content from Vector Search"
+- Then check "COMPLETE RESUME TEXT" section (if present)
+- Information like Languages, Driving License, References, Hobbies, Awards may ONLY be in the complete text
+
+────────────────────────────────RESPONSE FORMAT GUIDELINES
 ────────────────────────────────
 - Use a clear structure with bullet points or numbered lists when helpful
 - Mention candidate names prominently
@@ -190,14 +256,27 @@ Search Results:
 Please provide a helpful answer based on these candidates.""")
     ])
     
-    # Generate answer
+    # Generate answer with fallback
     chain = prompt | llm | StrOutputParser()
     
-    answer = chain.invoke({
-        "query": query,
-        "context": context,
-        "history": history_text
-    })
+    try:
+        answer = chain.invoke({
+            "query": query,
+            "context": context,
+            "history": history_text
+        })
+    except Exception as e:
+        # If Groq fails (rate limit), fallback to Gemini
+        if "rate_limit" in str(e).lower() or "429" in str(e):
+            print("   ⚠️  Groq rate limit hit, falling back to Gemini...")
+            chain_gemini = prompt | llm_gemini | StrOutputParser()
+            answer = chain_gemini.invoke({
+                "query": query,
+                "context": context,
+                "history": history_text
+            })
+        else:
+            raise  # Re-raise if it's not a rate limit error
     
     return answer
 

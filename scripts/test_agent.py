@@ -1,8 +1,15 @@
 # scripts/test_intelligent_agent.py
 
-# Step 1: Import the agent
+# Step 1: Add project root to Python path (works on any machine)
 import sys
-sys.path.append("d:/GEN AI internship work/Resume Intelligence System")
+import os
+
+# Get the directory where this script is located
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Get the project root (parent of scripts folder)
+project_root = os.path.dirname(script_dir)
+# Add to Python path
+sys.path.insert(0, project_root)
 
 from app.workflows.intelligent_agent import ResumeIntelligenceAgent
 
@@ -11,8 +18,7 @@ print("Creating agent...")
 agent = ResumeIntelligenceAgent()
 
 # Step 3: Ask a simple question
-query = "summarize each candidate's details and present it to me in short only main points"
-
+query = input("what is the query?")
 print(f"\nAsking: {query}\n")
 
 # Step 4: Get the answer

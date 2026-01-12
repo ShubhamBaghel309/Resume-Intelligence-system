@@ -1,8 +1,6 @@
-# check_pdfs.py
-import os
-
-pdf_folder = "downloaded_pdfs"
-pdf_files = [f for f in os.listdir(pdf_folder) if f.endswith('.pdf')]
-
-print(f"Total PDFs found: {len(pdf_files)}")
-print(f"First 5: {pdf_files[:5]}")
+import sqlite3
+conn = sqlite3.connect("resumes.db")
+cursor = conn.cursor()
+cursor.execute("SELECT candidate_name, total_experience_years FROM parsed_resumes WHERE total_experience_years >= 10")
+print(cursor.fetchall())
+conn.close()

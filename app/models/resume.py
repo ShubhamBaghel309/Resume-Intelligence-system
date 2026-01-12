@@ -40,4 +40,7 @@ class ParsedResume(BaseModel):
     
     work_experience: list[WorkExperience] = Field(default_factory=list)
     education: list[Education] = Field(default_factory=list)
-    projects: list[Project] = Field(default_factory=list)  # NEW
+    projects: list[Project] = Field(default_factory=list)
+    
+    # Additional sections (achievements, awards, references, publications, etc.)
+    additional_information: Optional[str] = None

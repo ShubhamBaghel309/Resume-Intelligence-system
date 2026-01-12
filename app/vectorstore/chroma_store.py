@@ -1,17 +1,30 @@
 import chromadb
 from typing import List, Dict
 from sentence_transformers import SentenceTransformer
-from chromadb.config import Settings
+import os
 
 class ResumeVectorStore:
     """Production-grade vector store for resume embeddings"""
     
     def __init__(self, persist_directory: str = "storage/chroma"):
-        # Persistent client (survives restarts)
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        # ✅ FIX: Set cache directories to D drive to avoid C drive full issues
+        # HuggingFace/SentenceTransformer cache (where models are downloaded)
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(persist_directory)), "model_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ['HF_HOME'] = cache_dir
+        os.environ['TRANSFORMERS_CACHE'] = cache_dir
+        os.environ['SENTENCE_TRANSFORMERS_HOME'] = cache_dir
+        
+        # Chroma data directory (where vector embeddings are stored)
+        abs_persist_dir = os.path.abspath(persist_directory)
+        os.makedirs(abs_persist_dir, exist_ok=True)
+        
+        # ChromaDB 1.4.0: PersistentClient is the CORRECT new API
+        self.client = chromadb.PersistentClient(path=abs_persist_dir)
         
         # Best balance of speed and quality
-        self.embedder = SentenceTransformer('all-mpnet-base-v2')
+        # Will use the cache_dir set above instead of C drive default
+        self.embedder = SentenceTransformer('all-mpnet-base-v2', cache_folder=cache_dir)
         
         # Create collection with metadata indexing
         self.collection = self.client.get_or_create_collection(
@@ -20,11 +33,7 @@ class ResumeVectorStore:
         )
     
     def add_resume_chunks(
-        self, 
-        resume_id: str, 
-        chunks: List[Dict[str, str]], 
-        metadata: Dict
-    ):
+        self, resume_id: str, chunks: List[Dict[str, str]], metadata: Dict):
         """
         Add multiple chunks for one resume (idempotent - safe to call multiple times)
         

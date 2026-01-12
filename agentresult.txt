@@ -305,3 +305,216 @@ His relevant projects include:
 5. How do you think your experience with Generative AI models like GPT-2 and Stable Diffusion XL can be applied to real-world problems, and what potential applications do you see for these technologies?
 
 These questions are designed to assess Shubham's understanding of Generative AI concepts, his experience with implementing complex models, and his ability to think critically about the applications and limitations of these technologies.
+
+
+
+
+
+🤖 CONVERSATIONAL AGENT TEST
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TEST 1: New conversation
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+======================================================================
+📝 USER QUERY: Find Python developers with more than 5 years experience
+🆕 NEW SESSION: session_ed7e1a0f42e3
+======================================================================
+
+🧠 QUERY ANALYSIS:
+   Type: skill_based
+   Strategy: hybrid
+   Reasoning: The query is looking for developers with a specific skill (Python) and experience, so a hybrid search strategy is recommended to find the best matches.
+   Confidence: 0.80
+
+📊 EXECUTING SQL FILTERS...
+   SQL: SELECT resume_id FROM parsed_resumes WHERE total_experience_years >= ? AND (skills LIKE ?)
+   Params: [5, '%Python%']
+   ✅ Found 1 candidates via SQL
+
+🔍 EXECUTING VECTOR SEARCH...
+   Filtering to 1 candidates from SQL
+   ✅ Found 10 vector matches
+
+💎 ENRICHING RESULTS...
+   Deduplicated: 10 chunks → 1 unique resumes
+   ✅ Enriched 1 resumes with full data
+
+🤖 GENERATING ANSWER...
+   ⚠️  DEBUG: No matched_chunks found for RATISH NAIR
+   ✅ Answer generated (1343 chars)
+
+======================================================================
+✅ FINAL ANSWER:
+======================================================================
+Based on the provided resume, I found one Python developer with more than 5 years of experience:
+
+* **RATISH NAIR**:
+  * Has 20 years of experience
+  * Lists Python as one of his skills
+  * Has worked on multiple projects that utilize Python, including:
+    + MNSIT Fashion
+    + Handwriting Detection
+    + Facial Recognition (using OpenCV)
+    + Twitter Analysis (using Twitter API and Sentiment Analysis)
+    + Stock Market Prediction (using DNN and Random Forest Classifier)
+    + Covid Prediction (using Prophet and Time series)
+    + Traffic Analysis (using Linear Regression, K Means Cluster, and Regression Model)
+    + Solar Radiation Prediction (using Neural Networks, Decision Tree, Random Forest Regressor, XG-Boost, Bayesian Theorem, and SVM)
+    + Eclipse Prediction (using XG-Boost and Random Forest Regressor)
+    + Ozone Layer Prediction (using DNN, KNN, SVM, XG-Boost, and Random Forest Regressor)
+    + Hepatitis Prediction (using Random Forest Regressor, SVM, KNN, and Logistic Regression)
+
+Note that while Ratish Nair has a strong background in data science and machine learning, his current role is listed as an Assistant Teacher, and his work experience is not explicitly stated to be in a Python development role. However, based on the skills and projects listed, he appears to have significant experience with Python. 
+======================================================================
+💾 Saved to session: session_ed7e1a0f42e3
+👥 Returned 1 candidates
+======================================================================
+
+📊 Result: Found 1 candidates
+🆔 Session ID: session_ed7e1a0f42e3
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TEST 2: Follow-up question (should understand 'their')
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+======================================================================
+📝 USER QUERY: Show me their projects
+💬 CONTINUING SESSION: session_ed7e1a0f42e3 (2 previous messages)
+======================================================================
+
+🧠 QUERY ANALYSIS:
+   Type: project_based
+   Strategy: sql_only
+   Reasoning: The query is asking for projects of a specific candidate, so we can directly retrieve the project information from the database using the candidate ID. 
+   Confidence: 1.00
+   📜 Used conversation context (2 messages)
+
+📊 EXECUTING SQL FILTERS...
+   🎯 Follow-up query: Filtering to 1 previously discussed candidates
+   SQL: SELECT resume_id FROM parsed_resumes WHERE resume_id IN (?)
+   Params: ['ccded4e6-ed27-4924-95b1-c2e312edc612']
+   ✅ Found 1 candidates via SQL
+
+🔍 SKIPPING VECTOR SEARCH (sql_only strategy)
+   Using 1 candidates from SQL directly
+
+💎 ENRICHING RESULTS...
+   Deduplicated: 1 chunks → 1 unique resumes
+   ✅ Enriched 1 resumes with full data
+
+🤖 GENERATING ANSWER...
+   ⚠️  DEBUG: No matched_chunks found for RATISH NAIR
+   ✅ Answer generated (3909 chars)
+
+======================================================================
+✅ FINAL ANSWER:
+======================================================================
+Based on the provided resume of **RATISH NAIR**, here are the projects mentioned:  
+
+1. **Twitter Analysis**
+        * Description: Used Twitter API to track all tweets relating to the company. Performed sentiment analysis after collecting data. Analyzed data by converting them using NLP. Recognized patterns to arrive at the public’s perception on the company.
+        * Technologies: Twitter API, Sentiment Analysis, NLP
+2. **Comment Analysis**
+        * Description: Determined major product issues via monitoring of comments. Performed data collection and analysis.
+        * Technologies: Data Collection, Data Analysis
+3. **Stock Market Prediction**
+        * Description: Culled stock price data from Yahoo Finance repository. Used DNN and Random Forest Classifier to predict stock prices (leaned towards using DNN as this resulted in a more accurate model).
+        * Technologies: Yahoo Finance, DNN, Random Forest Classifier
+4. **Covid Prediction**
+        * Description: Utilized prophet and time series to predict spread rate of Covid in Japan. Juxtaposed model to real-time graphs. Applied ANN to improve predictions.
+        * Technologies: Prophet, Time series, ANN
+5. **Growth Prediction**
+        * Description: Applied statistics to build a model that could predict the next value. Applied predicted value to the resulting value from an equation. Simplistic and straightforward modelling.
+        * Technologies: Statistics, Predictive Modeling
+6. **IPL Prediction/ World Cup Prediction**
+        * Description: Predicted cricket team’s probability of winning a match using historical match results and formation. Used random forest classifier. Verification of predicted data came at 98% as compared with real-world data.
+        * Technologies: Random Forest Classifier
+7. **Traffic Analysis**
+        * Description: Predicted average wait time in a given city. Used linear regression, K Means Cluster and Regression Model. Visualized data though folium heatmap, matplotlib and seaborn.
+        * Technologies: Linear Regression, K Means Cluster, Regression Model, folium heatmap, matplotlib, seaborn
+8. **Solar Radiation Prediction**
+        * Description: Modeled solar radiation levels in a given year. Utilized Neural Networks, Decision Tree, Random Forest Regressor, XG-Boost, Bayesian Theorem and SVM.
+        * Technologies: Neural Networks, Decision Tree, Random Forest Regressor, XG-Boost, Bayesian Theorem, SVM
+9. **Eclipse Prediction**
+        * Description: Used historical data to predict the next solar and lunar eclipse event. Used XG-Boost and Random Forest Regressor. Resulted in 10 future predictions which were verified using available data.
+        * Technologies: XG-Boost, Random Forest Regressor
+10. **Ozone Layer Prediction**
+        * Description: Used data to predict ozone layer thickness. Used DNN, KNN, SVM XG-Boost and Random Forest Regressor (DNN resulted in highest accuracy).        
+        * Technologies: DNN, KNN, SVM, XG-Boost, Random Forest Regressor
+11. **Hepatitis Prediction**
+        * Description: Used available hepatitis data and correlated the likelihood of acquiring hepatitis along with other factors. Used Random Forest Regressor, SVM, KNN and Logistic Regression.
+        * Technologies: Random Forest Regressor, SVM, KNN, Logistic Regression     
+12. **Land Mine Detection Bot**
+        * Description: Built land mine detection bot with focus on scanning, detection and placing the mine in the bot.
+        * Technologies: Robotics, Mechanical, Electrical, Electronics, Programming 
+13. **MNSIT Fashion**
+        * Description: Developed as part of Data Science curriculum based on Python.
+        * Technologies: Python
+14. **Handwriting Detection**
+        * Description: Developed as part of Data Science curriculum based on Python.
+        * Technologies: Python
+15. **Facial Recognition**
+        * Description: Developed as part of Data Science curriculum based on Python, using OpenCV.
+        * Technologies: Python, OpenCV
+
+These projects demonstrate **RATISH NAIR**'s experience in various areas, including data analysis, machine learning, and robotics.
+======================================================================
+💾 Saved to session: session_ed7e1a0f42e3
+👥 Returned 1 candidates
+======================================================================
+
+📊 Result: 1 candidates
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TEST 3: Another follow-up (should use same candidates)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+======================================================================
+📝 USER QUERY: What are their skills?
+💬 CONTINUING SESSION: session_ed7e1a0f42e3 (4 previous messages)
+======================================================================
+
+🧠 QUERY ANALYSIS:
+   Type: complex_multi_criteria
+   Strategy: sql_only
+   Reasoning: The user is asking about the skills of a previously discussed candidate, so we can directly retrieve the skills from the candidate's profile.
+   Confidence: 0.90
+   📜 Used conversation context (4 messages)
+
+📊 EXECUTING SQL FILTERS...
+   🎯 Follow-up query: Filtering to 1 previously discussed candidates
+   SQL: SELECT resume_id FROM parsed_resumes WHERE resume_id IN (?)
+   Params: ['ccded4e6-ed27-4924-95b1-c2e312edc612']
+   ✅ Found 1 candidates via SQL
+
+🔍 SKIPPING VECTOR SEARCH (sql_only strategy)
+   Using 1 candidates from SQL directly
+
+💎 ENRICHING RESULTS...
+   Deduplicated: 1 chunks → 1 unique resumes
+   ✅ Enriched 1 resumes with full data
+
+🤖 GENERATING ANSWER...
+   ⚠️  DEBUG: No matched_chunks found for RATISH NAIR
+   ✅ Answer generated (964 chars)
+
+======================================================================
+✅ FINAL ANSWER:
+======================================================================
+Based on the provided resume, **Ratish Nair** has the following skills:
+
+* Machine Learning: Prophet, XG-Boost, Predictive Modeling, SVM, ANN, Random Forest Classifier, Neural Networks, K Means Cluster, Logistic Regression, Bayesian Theorem, Pattern Recognition, NLP, DNN, Random Forest Regressor
+* Data Analysis: Data Mining, Statistics, Data Visualization, matplotlib, seaborn, folium heatmap
+* Programming: Python, SQL
+* Robotics and Electronics: Robotics, Mechanical, Electrical, Electronics, Programming
+* Business and Management: Inventory Management, Problem-solving, Menu Planning, Curriculum Development, Human Resources Management, Marketing Initiatives, Business Modeling
+* Other: Time series, Regression Model, Yahoo Finance, Twitter API, OpenCV
+
+These skills are demonstrated through his work experience, education, and various projects, including Twitter Analysis, Stock Market Prediction, Covid Prediction, and Land Mine Detection Bot, among others.
+======================================================================
+💾 Saved to session: session_ed7e1a0f42e3
+👥 Returned 1 candidates
+======================================================================
+
+📊 Result: 1 candidates
+
+✅ CONVERSATIONAL TEST COMPLETE!
+(myenv311) PS D:\GEN AI internship work\Resume Intelligence System> 
