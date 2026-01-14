@@ -264,6 +264,6 @@ if __name__ == "__main__":
     history = load_chat_history(session_id)
     print(f"✅ Loaded {len(history)} messages:")
     for msg in history:
-        print(f"   {msg['role']}: {msg['content'][:50]}...")
+        print(f"   {msg['role']}: {msg['content'][:100]}...")
     
     print("\n✅ All tests passed!")

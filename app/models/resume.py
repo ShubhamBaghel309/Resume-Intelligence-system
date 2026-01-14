@@ -1,10 +1,11 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Annotated
+import json
 
 class WorkExperience(BaseModel):
     """Single job entry"""
     company: str
-    role: str
+    role: Optional[str] = None  # Make optional as some resumes may not specify role
     start_date: Optional[str] = None  # Separate start date
     end_date: Optional[str] = None    # Separate end date  
     duration: Optional[str] = None    # Keep for backward compatibility
@@ -12,7 +13,7 @@ class WorkExperience(BaseModel):
 
 class Education(BaseModel):
     institute: str
-    degree: str
+    degree: Optional[str] = None  # Make optional as some resumes may not specify degree type
     year: Optional[str] = None
 
 class Project(BaseModel):
@@ -44,3 +45,17 @@ class ParsedResume(BaseModel):
     
     # Additional sections (achievements, awards, references, publications, etc.)
     additional_information: Optional[str] = None
+    
+    @field_validator('additional_information', mode='before')
+    @classmethod
+    def convert_dict_to_string(cls, v):
+        """Convert dict to formatted string if LLM returns dict instead of string"""
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            # Convert dict to readable string format
+            lines = []
+            for key, value in v.items():
+                lines.append(f"{key}: {value}")
+            return "\n".join(lines)
+        return v

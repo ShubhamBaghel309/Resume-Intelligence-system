@@ -1,7 +1,7 @@
 # app/workflows/intelligent_agent.py
 from typing import TypedDict, Annotated, Literal
 from langgraph.graph import StateGraph, END
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
@@ -38,6 +38,26 @@ class AgentState(TypedDict):
 
 
 # ============= Query Analysis Models =============
+class EntitiesModel(BaseModel):
+    """Structured entities extracted from the query"""
+    names: list[str] = Field(default_factory=list, description="Candidate names mentioned")
+    skills: list[str] = Field(default_factory=list, description="Technical skills mentioned")
+    companies: list[str] = Field(default_factory=list, description="Company names mentioned")
+    locations: list[str] = Field(default_factory=list, description="Locations mentioned")
+    degrees: list[str] = Field(default_factory=list, description="Educational degrees mentioned")
+    job_titles: list[str] = Field(default_factory=list, description="Job titles mentioned")
+
+class FiltersModel(BaseModel):
+    """Structured filters extracted from the query"""
+    candidate_ids: list[str] = Field(default_factory=list, description="Specific candidate IDs for follow-up queries")
+    min_experience: float | None = Field(default=None, description="Minimum years of experience")
+    max_experience: float | None = Field(default=None, description="Maximum years of experience")
+    required_skills: list[str] = Field(default_factory=list, description="Required skills")
+    location: str | None = Field(default=None, description="Location filter")
+    company: str | None = Field(default=None, description="Company filter")
+    job_title: str | None = Field(default=None, description="Job title filter")
+    current_role: str | None = Field(default=None, description="Current role filter")
+
 class QueryAnalysis(BaseModel):
     """Structured output from query analyzer"""
 
@@ -55,11 +75,13 @@ class QueryAnalysis(BaseModel):
         description="What the user wants to know (e.g., 'find candidates', 'get education details', 'compare candidates')"
     )
 
-    entities: dict = Field(
+    entities: EntitiesModel = Field(
+        default_factory=EntitiesModel,
         description="Extracted entities: names, skills, companies, locations, degrees, etc."
     )
 
-    filters: dict = Field(
+    filters: FiltersModel = Field(
+        default_factory=FiltersModel,
         description="Structured filters: min_experience, max_experience, etc."
     )
 
@@ -86,13 +108,13 @@ from dotenv import load_dotenv
 load_dotenv()
 # API key loaded from .env file
 
-llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
+llm = ChatOpenAI(
+    model="gpt-4o-mini",
     temperature=0.1,  # Low temperature for structured analysis
-    max_tokens=4096,
+    max_tokens=4096
 )
 
-answer_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.1, max_tokens=4096)
+answer_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1, max_tokens=4096)
 
 
 # ============= Agent Nodes =============
@@ -188,6 +210,11 @@ SUMMARY (max 80 words):"""
         print(f"⚠️  Summarization failed: {e}")
         # Fallback: just list the topics
         return f"Previous conversation covered {len(messages)} messages about candidate search."
+
+
+
+
+        
 def analyze_query_node(state: AgentState) -> AgentState:
     """
     Node 1: Analyze user query to understand intent and plan strategy
@@ -353,12 +380,21 @@ DATA TRUST POLICY
 CURRENT QUERY: {query}
 
 INSTRUCTIONS:
-1. If query uses pronouns (his/her/their/these/those/them), look at 📌 MOST RECENT CANDIDATES section
-2. "these 2 candidates" = the first 2 from MOST RECENT CANDIDATES list
-3. "his/her" = the single candidate from MOST RECENT CANDIDATES (if only 1)
-4. Extract candidate names and add to entities.names
-5. For 'X developer' queries, extract X as a skill (not job title)
-6. Analyze the query and provide structured output""",
+1. **ALWAYS extract explicit candidate names from the CURRENT QUERY** (e.g., "Lavanya Jain", "John Smith")
+   - Add ALL mentioned names to entities.names, even if they're not in conversation history
+   - The database will handle finding them - your job is to extract them
+
+2. If query uses pronouns (his/her/their/these/those/them):
+   - Look at 📌 MOST RECENT CANDIDATES section to resolve the pronoun
+   - Extract the resolved name and add to entities.names
+   - "these 2 candidates" = the first 2 from MOST RECENT CANDIDATES list
+   - "his/her" = the single candidate from MOST RECENT CANDIDATES (if only 1)
+
+3. For 'X developer' queries, extract X as a skill (not job title)
+
+4. Analyze the query and provide structured output
+
+CRITICAL: If the query says "education of Lavanya Jain", you MUST extract entities.names = ["Lavanya Jain"]!""",
             ),
         ]
     )
@@ -375,7 +411,7 @@ INSTRUCTIONS:
 
         state["query_analysis"] = analysis.model_dump()
         state["search_strategy"] = analysis.search_strategy
-        state["sql_filters"] = analysis.filters
+        state["sql_filters"] = analysis.filters.model_dump()
 
         print(f"\n🧠 QUERY ANALYSIS:")
         print(f"   Type: {analysis.query_type}")
@@ -602,7 +638,7 @@ SQL QUERY:
         print(f"   ✅ LLM SQL found {len(candidate_ids)} candidates")
 
     except Exception as e:
-        print(f"   ❌ LLM SQL failed: {str(e)[:100]}")
+        print(f"   ❌ LLM SQL failed: {str(e)}")
         state["candidate_ids"] = []
 
     return state
@@ -760,28 +796,49 @@ def generate_answer_node(state: AgentState) -> AgentState:
     if len(state["final_results"]) > 5:
         print(f"   ⚠️  Limiting results: {len(state['final_results'])} candidates → top 5")
     
-    # ✅ ADDITIONAL FIX: If query is about ONE specific candidate, filter to just that candidate
-    # Example: "show me projects of shubham baghel" or "his projects"
     query_lower = state["query"].lower()
     is_specific_query = any(keyword in query_lower for keyword in [
         "their", "his", "her", "this candidate", "the candidate"
     ])
     
-    # If asking about specific candidate AND we have candidate_ids filter (follow-up)
-    if is_specific_query and state["sql_filters"].get("candidate_ids"):
+    # ✅ INTENT-AWARE FILTERING: Only filter to single candidate if this is truly a follow-up query
+    # NOT a search query asking "which candidates have X"
+    
+    # Indicators of SEARCH queries (should show ALL results):
+    search_indicators = [
+        "which candidate",
+        "find candidate",
+        "show me candidate",
+        "list candidate",
+        "who has",
+        "candidates with",
+        "find me",
+        "search for"
+    ]
+    
+    is_search_query = any(indicator in query_lower for indicator in search_indicators)
+    
+    # If asking about specific candidate AND we have candidate_ids filter (follow-up from chat history)
+    if is_specific_query and state["sql_filters"].get("candidate_ids") and not is_search_query:
         candidate_id = state["sql_filters"]["candidate_ids"][0]
         # Filter to only this candidate
         results_to_use = [r for r in results_to_use if r["resume_id"] == candidate_id]
         print(f"   🎯 Specific query detected: Showing ONLY candidate {candidate_id}")
     
-    # OR if name was specified in query, filter to exact name match
-    elif state["query_analysis"].get("entities", {}).get("names"):
+    # OR if name was specified AND it's a follow-up query (not a search)
+    # Example: "show me John's education" → filter to John only
+    # But NOT: "which candidate named John has Python" → show John in results but don't filter others
+    elif state["query_analysis"].get("entities", {}).get("names") and not is_search_query:
         specified_name = state["query_analysis"]["entities"]["names"][0].lower()
         # Check if only 1 candidate matches this name
         name_matches = [r for r in results_to_use if specified_name in r.get("candidate_name", "").lower()]
         if len(name_matches) == 1:
             results_to_use = name_matches
             print(f"   🎯 Single candidate query: Showing ONLY {name_matches[0]['candidate_name']}")
+        elif len(name_matches) > 1:
+            # Multiple candidates with similar names - show all
+            print(f"   📋 Found {len(name_matches)} candidates matching '{specified_name}' - showing all")
+    
     
     answer = generate_answer(
         query=state["query"], search_results=results_to_use
@@ -908,7 +965,7 @@ class ResumeIntelligenceAgent:
         # Create or use existing session
         if not session_id:
             session_id = create_chat_session(
-                title=user_query[:50]
+                title=user_query
             )  # Use first 50 chars as title
             chat_history = []
         else:

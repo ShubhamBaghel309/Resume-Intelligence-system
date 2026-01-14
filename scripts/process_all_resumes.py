@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.ingestion.uploader import store_uploaded_pdfs
+from app.ingestion.extractor import process_batch, extract_text_from_pdf, save_extracted_text
 from app.parsing.resume_parser import parse_resume_with_llm, save_parsed_resume
 from app.vectorstore.chroma_store import ResumeVectorStore
 from app.vectorstore.embeddings import create_resume_chunks, create_resume_metadata
@@ -16,7 +17,7 @@ from app.models.resume import ParsedResume
 import sqlite3
 import json
 from datetime import datetime
-import time  # ← Add at top of file (line 8)
+import time
 
 # ============= CONFIGURATION =============
 PDF_FOLDER = "D:/GEN AI internship work/Resume Intelligence System/resumedata/resumedata"
@@ -60,21 +61,82 @@ def upload_pdfs():
         return None
 
 
-# ============= STEP 2: PARSE RESUMES =============
-def parse_all_resumes():
+# ============= STEP 2: EXTRACT TEXT FROM PDFs =============
+def extract_all_text(batch_id):
     print("\n" + "="*70)
-    print("🧠 STEP 2: PARSING RESUMES WITH LLM")
+    print("📄 STEP 2: EXTRACTING TEXT FROM PDFs")
     print("="*70)
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Get all unparsed documents
+    # Get all uploaded documents that haven't been extracted yet
     cursor.execute("""
-        SELECT document_id, raw_text, original_filename
+        SELECT document_id, file_path, original_filename
         FROM documents
-        WHERE status = 'uploaded'
-        ORDER BY created_at
+        WHERE batch_id = ? AND status = 'uploaded'
+    """, (batch_id,))
+    
+    documents = cursor.fetchall()
+    conn.close()
+    
+    if not documents:
+        print("ℹ️  No documents need text extraction. All may already be extracted.")
+        return 0, 0
+    
+    print(f"📊 Found {len(documents)} PDFs to extract text from")
+    
+    success_count = 0
+    failed_count = 0
+    failed_files = []
+    
+    for i, (doc_id, file_path, filename) in enumerate(documents, 1):
+        print(f"\n[{i}/{len(documents)}] Extracting: {filename[:60]}...")
+        
+        try:
+            text = extract_text_from_pdf(file_path)
+            save_extracted_text(doc_id, text)
+            success_count += 1
+            print(f"   ✅ Success! Extracted {len(text)} characters")
+        except Exception as e:
+            failed_count += 1
+            failed_files.append((filename, str(e)))
+            print(f"   ❌ Failed: {str(e)}")
+    
+    # Summary
+    print("\n" + "="*70)
+    print("📊 EXTRACTION SUMMARY:")
+    print(f"   ✅ Successful: {success_count}")
+    print(f"   ❌ Failed: {failed_count}")
+    if success_count + failed_count > 0:
+        print(f"   📈 Success Rate: {success_count/(success_count+failed_count)*100:.1f}%")
+    
+    if failed_files:
+        print("\n❌ Failed files:")
+        for fname, error in failed_files[:10]:  # Show first 10
+            print(f"   - {fname}: {error}")
+    
+    return success_count, failed_count
+
+
+# ============= STEP 3: PARSE RESUMES =============
+def parse_all_resumes():
+    print("\n" + "="*70)
+    print("🧠 STEP 3: PARSING RESUMES WITH LLM")
+    print("="*70)
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Get all unparsed documents (not already parsed)
+    cursor.execute("""
+        SELECT d.document_id, d.raw_text, d.original_filename
+        FROM documents d
+        WHERE d.status = 'extracted'
+        AND NOT EXISTS (
+            SELECT 1 FROM parsed_resumes pr WHERE pr.document_id = d.document_id
+        )
+        ORDER BY d.created_at
     """)
     
     documents = cursor.fetchall()
@@ -85,48 +147,46 @@ def parse_all_resumes():
         return 0, 0
     
     print(f"📊 Found {len(documents)} documents to parse")
-    print(f"⏱️  Estimated time: ~{len(documents) * 3} seconds ({len(documents) * 3 / 60:.1f} minutes)")
+    print(f"⏱️  Estimated time: ~{len(documents) * 2} seconds ({len(documents) * 2 / 60:.1f} minutes)")
     
     success_count = 0
     failed_count = 0
     failed_files = []
     
     for i, (doc_id, raw_text, filename) in enumerate(documents, 1):
-        print(f"\n[{i}/{len(documents)}] Parsing: {filename[:50]}...")
+        print(f"\n[{i}/{len(documents)}] Parsing: {filename[:60]}...")
         
-        # Retry with exponential backoff for rate limiting
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                parsed = parse_resume_with_llm(raw_text)
-                save_parsed_resume(doc_id, parsed)
-                success_count += 1
-                print(f"   ✅ Success! Total: {success_count}/{i}")
-                break  # Success, exit retry loop
-                
-            except Exception as e:
-                error_str = str(e).lower()
-                
-                # Check if it's a rate limit error
-                if "rate" in error_str or "429" in error_str or "limit" in error_str:
-                    wait_time = 60 * (attempt + 1)  # 60s, 120s, 180s
-                    print(f"   ⏸️  Rate limited! Waiting {wait_time}s (attempt {attempt+1}/{max_retries})...")
-                    time.sleep(wait_time)
-                    continue  # Retry
-                else:
-                    # Non-rate-limit error, fail immediately
-                    failed_count += 1
-                    failed_files.append((filename, str(e)))
-                    print(f"   ❌ Failed: {str(e)[:100]}")
-                    break
-        else:
-            # All retries exhausted
+        try:
+            parsed = parse_resume_with_llm(raw_text)
+            save_parsed_resume(doc_id, parsed)
+            
+            # Update document status to 'parsed'
+            update_conn = sqlite3.connect(DB_PATH)
+            update_cursor = update_conn.cursor()
+            update_cursor.execute(
+                "UPDATE documents SET status = 'parsed' WHERE document_id = ?",
+                (doc_id,)
+            )
+            update_conn.commit()
+            update_conn.close()
+            
+            success_count += 1
+            print(f"   ✅ Success! Total: {success_count}/{i}")
+            
+        except Exception as e:
             failed_count += 1
-            failed_files.append((filename, "Rate limit - max retries exceeded"))
-            print(f"   ❌ Rate limit exceeded after {max_retries} retries")
+            error_msg = str(e)
+            failed_files.append((filename, error_msg))
+            print(f"   ❌ Failed: {error_msg}")
+            # Show detailed error for first few failures to help diagnose
+            if failed_count <= 3:
+                print(f"       Full error: {error_msg}")
         
-        # Wait between requests (Groq free tier: 30 req/min = 2s/req minimum)
-        time.sleep(3)  # 3 seconds between requests to stay under limit
+        # Wait between requests to avoid rate limits
+        # OpenAI Tier 1: 500 RPM, 200K TPM for gpt-4o-mini
+        # When sharing API key, be more conservative: 5-10 seconds between requests
+        # This ensures we don't exceed TPM limits from concurrent/recent usage
+        time.sleep(10)  # 10 seconds = ~6 requests/min, very safe for shared API keys
     
     # Summary
     print("\n" + "="*70)
@@ -139,7 +199,7 @@ def parse_all_resumes():
     if failed_files:
         print("\n❌ Failed files:")
         for fname, error in failed_files[:10]:  # Show first 10
-            print(f"   - {fname}: {error[:80]}")
+            print(f"   - {fname}: {error}")
     
     return success_count, failed_count
 
@@ -147,14 +207,14 @@ def parse_all_resumes():
 # ============= STEP 3: INDEX TO VECTOR STORE =============
 def index_all_resumes():
     print("\n" + "="*70)
-    print("🔍 STEP 3: INDEXING TO VECTOR STORE")
+    print("🔍 STEP 4: INDEXING TO VECTOR STORE")
     print("="*70)
     
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Get all parsed resumes with raw text
+    # Get all parsed resumes that haven't been indexed yet
     cursor.execute("""
         SELECT 
             pr.*,
@@ -163,6 +223,7 @@ def index_all_resumes():
         FROM parsed_resumes pr
         JOIN documents d ON pr.document_id = d.document_id
         WHERE d.status = 'parsed'
+        AND pr.indexed_at IS NULL
     """)
     
     resumes = cursor.fetchall()
@@ -224,11 +285,21 @@ def index_all_resumes():
                 metadata=metadata
             )
             
+            # Update indexed_at timestamp
+            update_conn = sqlite3.connect(DB_PATH)
+            update_cursor = update_conn.cursor()
+            update_cursor.execute(
+                "UPDATE parsed_resumes SET indexed_at = ? WHERE resume_id = ?",
+                (datetime.now().isoformat(), resume_dict['resume_id'])
+            )
+            update_conn.commit()
+            update_conn.close()
+            
             indexed_count += 1
             print(f"   ✅ Indexed! Total: {indexed_count}/{i}")
             
         except Exception as e:
-            print(f"   ❌ Failed: {str(e)[:100]}")
+            print(f"   ❌ Failed: {str(e)}")
     
     print("\n" + "="*70)
     print("📊 INDEXING SUMMARY:")
@@ -253,12 +324,17 @@ def main():
         print("\n❌ Pipeline stopped: Upload failed")
         return
     
-    # Step 2: Parse
+    # Step 2: Extract Text
+    extracted, extract_failed = extract_all_text(batch_id)
+    if extracted == 0:
+        print("\n⚠️  No text was extracted successfully")
+    
+    # Step 3: Parse
     success, failed = parse_all_resumes()
     if success == 0:
         print("\n⚠️  No resumes were parsed successfully")
     
-    # Step 3: Index
+    # Step 4: Index
     indexed = index_all_resumes()
     
     # Final summary
@@ -270,7 +346,8 @@ def main():
     print("="*70)
     print(f"⏱️  Total time: {duration}")
     print(f"📊 Results:")
-    print(f"   - Uploaded: {success + failed} documents")
+    print(f"   - Uploaded: {extracted + extract_failed} documents")
+    print(f"   - Extracted: {extracted} successfully")
     print(f"   - Parsed: {success} successfully")
     print(f"   - Indexed: {indexed} resumes ({indexed * 5} chunks)")
     print("="*70)

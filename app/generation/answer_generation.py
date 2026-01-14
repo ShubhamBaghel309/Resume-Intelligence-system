@@ -5,28 +5,36 @@ from langchain_core.output_parsers import StrOutputParser
 import os
 import json
 from dotenv import load_dotenv
-
+from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 # Initialize LLMs
 load_dotenv()
 # API key loaded from .env file
 
-# Primary LLM: Groq (fast, 128K context)
+# Primary LLM: OpenAI (good balance, may have rate limits)
+llm_openai = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.1,
+    max_tokens=4096,
+    openai_api_key=os.environ["OPENAI_API_KEY"]
+)
+
+# Fallback LLM 1: Groq (fast, 128K context)
 llm_groq = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0.1,
     max_tokens=4096
 )
 
-# Fallback LLM: Gemini (2M context, no rate limits)
-from langchain_google_genai import ChatGoogleGenerativeAI
+# Fallback LLM 2: Gemini (2M context, no rate limits)
 llm_gemini = ChatGoogleGenerativeAI(
     model="gemini-2.0-flash",
     temperature=0.1,
     max_tokens=4096
 )
 
-# Default to Groq
-llm = llm_groq
+# Use OpenAI as default
+llm = llm_openai
 
 
 def format_resume_for_context(resume_data: dict, include_full_text: bool = False) -> str:
@@ -260,21 +268,35 @@ Please provide a helpful answer based on these candidates.""")
     chain = prompt | llm | StrOutputParser()
     
     try:
+        # Try OpenAI first
         answer = chain.invoke({
             "query": query,
             "context": context,
             "history": history_text
         })
     except Exception as e:
-        # If Groq fails (rate limit), fallback to Gemini
+        # If OpenAI fails (rate limit), fallback to Groq
         if "rate_limit" in str(e).lower() or "429" in str(e):
-            print("   ⚠️  Groq rate limit hit, falling back to Gemini...")
-            chain_gemini = prompt | llm_gemini | StrOutputParser()
-            answer = chain_gemini.invoke({
-                "query": query,
-                "context": context,
-                "history": history_text
-            })
+            print("   ⚠️  OpenAI rate limit hit, falling back to Groq...")
+            try:
+                chain_groq = prompt | llm_groq | StrOutputParser()
+                answer = chain_groq.invoke({
+                    "query": query,
+                    "context": context,
+                    "history": history_text
+                })
+            except Exception as groq_error:
+                # If Groq also fails, fallback to Gemini
+                if "rate_limit" in str(groq_error).lower() or "429" in str(groq_error):
+                    print("   ⚠️  Groq rate limit hit too, falling back to Gemini...")
+                    chain_gemini = prompt | llm_gemini | StrOutputParser()
+                    answer = chain_gemini.invoke({
+                        "query": query,
+                        "context": context,
+                        "history": history_text
+                    })
+                else:
+                    raise groq_error
         else:
             raise  # Re-raise if it's not a rate limit error
     

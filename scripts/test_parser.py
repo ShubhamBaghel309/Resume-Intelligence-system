@@ -47,8 +47,18 @@ for i, (document_id, filename, raw_text) in enumerate(documents, 1):
         parsed_resume = parse_resume_with_llm(raw_text)
         resume_id = save_parsed_resume(document_id, parsed_resume)
         
+        # Count ALL skills (merged from all categories)
+        total_skills = (
+            len(parsed_resume.programming_languages) +
+            len(parsed_resume.frameworks) +
+            len(parsed_resume.tools) +
+            len(parsed_resume.technical_skills)
+        )
+        
         print(f"   ✅ {parsed_resume.candidate_name}")
-        print(f"      Skills: {len(parsed_resume.technical_skills)}, Jobs: {len(parsed_resume.work_experience)}")
+        print(f"      Total Skills: {total_skills}, Jobs: {len(parsed_resume.work_experience)}")
+        if total_skills > 0:
+            print(f"      Skills breakdown: Prog={len(parsed_resume.programming_languages)}, Frameworks={len(parsed_resume.frameworks)}, Tools={len(parsed_resume.tools)}, Other={len(parsed_resume.technical_skills)}")
         print(f"      Resume ID: {resume_id}\n")
         success += 1
         

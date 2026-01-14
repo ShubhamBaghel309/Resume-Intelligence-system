@@ -407,7 +407,7 @@ if st.session_state.candidate_results:
                         <div class="candidate-detail">📧 {row['email'] or 'N/A'} | 📱 {row['phone'] or 'N/A'}</div>
                         <div class="candidate-detail">📍 {row['location'] or 'N/A'} | 💼 {row['current_role'] or 'N/A'}</div>
                         <div class="candidate-detail">⏱️ {row['total_experience_years'] or 0} years experience</div>
-                        <div class="candidate-detail">🔧 Skills: {row['skills'][:100] if row['skills'] else 'N/A'}...</div>
+                        <div class="candidate-detail">🔧 Skills: {row['skills'][:200] if row['skills'] else 'N/A'}{'...' if row['skills'] and len(row['skills']) > 200 else ''}</div>
                     </div>
                     """, unsafe_allow_html=True)
             
