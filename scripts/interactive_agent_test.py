@@ -199,24 +199,20 @@ def main():
             logger.log("Sending to agent...", "EXEC")
             
             # Get answer - returns a dict with answer, session_id, candidate_ids
+            # verbose=True shows internal workflow, but we only want the final answer
             result = agent.query(query, session_id, verbose=True)
             
             # Update session_id for next query
             session_id = result['session_id']
             answer = result['answer']
             
-            # Display answer
-            print("\n" + "="*80)
-            print("🤖 AGENT RESPONSE:")
-            print("="*80)
-            print(answer)
-            print("="*80)
+            # Display answer (verbose already printed it, so skip redundant prints)
+            # The verbose output already shows the answer at the end
             
-            # Log to file
-            logger.log(f"Query: {query}", "QUERY")
-            logger.log(f"Answer: {answer}", "RESPONSE")
-            logger.log(f"Session ID: {session_id}", "INFO")
-            logger.log(f"Candidates returned: {len(result.get('candidate_ids', []))}", "STATS")
+            # Log to file only (not to console - verbose mode already printed everything)
+            logger.log_file.write(f"[{datetime.now().strftime('%H:%M:%S')}] QUERY: {query}\n")
+            logger.log_file.write(f"[{datetime.now().strftime('%H:%M:%S')}] SESSION: {session_id}, CANDIDATES: {len(result.get('candidate_ids', []))}\n\n")
+            logger.log_file.flush()
             
             # Prompt for feedback
             print("\n💭 Was this response satisfactory? (y/n/comment): ", end="")

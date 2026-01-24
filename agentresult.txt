@@ -517,4 +517,3 @@ These skills are demonstrated through his work experience, education, and variou
 📊 Result: 1 candidates
 
 ✅ CONVERSATIONAL TEST COMPLETE!
-(myenv311) PS D:\GEN AI internship work\Resume Intelligence System> 

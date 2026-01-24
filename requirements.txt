@@ -1,26 +1,28 @@
+# Core Dependencies
+python-dotenv>=1.0.0
+
 # Web Framework
-fastapi
-uvicorn[standard]
+streamlit>=1.31.0
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
 
 # LangChain & LLM
-langchain
-langchain-groq
-langchain-google-genai
-langchain-community
-langgraph
+langchain>=0.1.0
+langchain-openai>=0.0.5
+langchain-community>=0.0.20
+langgraph>=0.0.20
 
 # Vector Store & Embeddings
-chromadb
-sentence-transformers
+chromadb>=0.4.22
+sentence-transformers>=2.3.0
 
 # PDF Processing
-pdfplumber
-PyPDF2
+PyPDF2>=3.0.0
+pdfplumber>=0.10.0
 
 # Database
-python-multipart
+python-multipart>=0.0.6
 
 # Utilities
-pydantic
-python-dotenv
-python-dateutil
+pydantic>=2.5.0
+python-dateutil>=2.8.2

@@ -6,6 +6,44 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
+    # Chat Sessions Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+        session_id TEXT PRIMARY KEY,
+        title TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Chat Messages Table (with candidate_names column)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        message_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        role TEXT,
+        content TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        candidate_names TEXT,
+        search_type TEXT,
+        query_analysis TEXT,
+        FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id)
+    )
+    """)
+
+    # Message Results Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS message_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT,
+        resume_id TEXT,
+        rank INTEGER,
+        FOREIGN KEY (message_id) REFERENCES chat_messages(message_id),
+        FOREIGN KEY (resume_id) REFERENCES parsed_resumes(resume_id)
+    )
+    """)
+
+    # Upload Batches Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS upload_batches (
         batch_id TEXT PRIMARY KEY,
@@ -54,6 +92,9 @@ def init_db():
         
         -- Projects (JSON array of project objects)
         projects TEXT,
+        
+        -- Additional Information (achievements, awards, references, etc.)
+        additional_information TEXT,
         
         -- Metadata
         parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

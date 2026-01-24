@@ -37,6 +37,70 @@ llm_gemini = ChatGoogleGenerativeAI(
 llm = llm_openai
 
 
+def generate_compact_list(search_results: list, query: str) -> str:
+    """
+    Generate compact list of ALL candidates (not detailed profiles)
+    Used when user asks for 'list of all', 'all candidates', etc.
+    
+    Args:
+        search_results: List of resume data dicts
+        query: Original user query
+        
+    Returns:
+        Compact markdown table/list of all candidates
+    """
+    print(f"   📋 Generating compact list of {len(search_results)} candidates...")
+    
+    lines = []
+    lines.append(f"**Found {len(search_results)} candidates matching your criteria:**\n")
+    lines.append("| # | Name | Experience | Current Role | Key Skills | Location |")
+    lines.append("|---|------|------------|--------------|------------|----------|")
+    
+    for i, resume in enumerate(search_results, 1):
+        try:
+            name = resume.get('candidate_name') or 'Unknown'
+            
+            # Safe experience handling
+            exp_val = resume.get('total_experience_years')
+            exp = f"{exp_val} yrs" if exp_val is not None else "N/A"
+            
+            role = resume.get('current_role') or 'Not specified'
+            location = resume.get('location') or 'N/A'
+            
+            # Get top 3 skills
+            skills_str = "N/A"
+            skills_data = resume.get('skills')
+            if skills_data:
+                try:
+                    skills = json.loads(skills_data) if isinstance(skills_data, str) else skills_data
+                    if skills and isinstance(skills, list) and len(skills) > 0:
+                        skills_str = ', '.join(str(s) for s in skills)
+                except Exception:
+                    # If parsing fails, use raw value
+                    skills_str = str(skills_data) if skills_data else "N/A"
+            
+            # Ensure all values are strings
+            name = str(name)
+            exp = str(exp)
+            role = str(role)
+            location = str(location)
+            skills_str = str(skills_str)
+            
+            lines.append(f"| {i} | {name} | {exp} | {role} | {skills_str} | {location} |")
+        except Exception as e:
+            # If any error, add a placeholder row
+            print(f"   ⚠️  Error processing candidate {i}: {e}")
+            lines.append(f"| {i} | Error processing candidate | N/A | N/A | N/A | N/A |")
+    
+    lines.append(f"\n**Total: {len(search_results)} candidates**")
+    lines.append("\n💡 *You can ask follow-up questions like:*")
+    lines.append("- \"Show me detailed profiles of candidates 1-5\"")
+    lines.append("- \"Among these, who has experience in machine learning?\"")
+    lines.append("- \"Filter to candidates with 5+ years experience\"")
+    
+    return "\n".join(lines)
+
+
 def format_resume_for_context(resume_data: dict, include_full_text: bool = False) -> str:
     """
     Convert resume data into readable text for LLM context
@@ -84,7 +148,7 @@ def format_resume_for_context(resume_data: dict, include_full_text: bool = False
             work = json.loads(resume_data['work_experience']) if isinstance(resume_data['work_experience'], str) else resume_data['work_experience']
             if work:
                 parts.append("\nWork Experience:")
-                for job in work[:3]:  # Limit to top 3 jobs
+                for job in work:
                     parts.append(f"  • {job.get('role', 'N/A')} at {job.get('company', 'N/A')} ({job.get('duration', 'N/A')})")
         except:
             pass
@@ -155,7 +219,7 @@ def format_resume_for_context(resume_data: dict, include_full_text: bool = False
     return "\n".join(parts)
 
 
-def generate_answer(query: str, search_results: list, conversation_history: list = None) -> str:
+def generate_answer(query: str, search_results: list, conversation_history: list = None, format_as_list: bool = False) -> str:
     """
     Generate natural language answer from search results
     
@@ -163,6 +227,7 @@ def generate_answer(query: str, search_results: list, conversation_history: list
         query: User's question
         search_results: List of resume data dicts from hybrid search
         conversation_history: Optional previous messages for context
+        format_as_list: If True, return compact list of ALL candidates (not detailed profiles)
         
     Returns:
         Natural language answer
@@ -171,6 +236,10 @@ def generate_answer(query: str, search_results: list, conversation_history: list
     # Format context from search results
     if not search_results:
         return "I couldn't find any candidates matching your criteria. Try broadening your search or adjusting the filters."
+    
+    # ✅ LIST ALL mode: Provide compact summary of ALL candidates
+    if format_as_list:
+        return generate_compact_list(search_results, query)
     
     # ✅ Smart decision: Include full raw_text ONLY for specific queries (1-2 candidates)
     # For broader searches (3+ candidates), rely on structured fields + matched_chunks
@@ -338,7 +407,7 @@ def generate_summary(search_results: list) -> str:
         summary += f"Average experience: {avg_exp:.1f} years. "
     
     if top_skills:
-        summary += f"Common skills: {', '.join(top_skills[:3])}. "
+        summary += f"Common skills: {', '.join(top_skills)}. "
     
     return summary
 

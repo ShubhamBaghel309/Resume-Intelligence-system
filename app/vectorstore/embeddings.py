@@ -85,10 +85,6 @@ def create_resume_chunks(parsed_resume: ParsedResume, raw_text: str = None) -> L
         
         experience_text = f"Work Experience of {parsed_resume.candidate_name}: " + " ".join(experience_parts)
         
-        # Truncate if too long (max 400 tokens ≈ 1600 chars)
-        if len(experience_text) > 1600:
-            experience_text = experience_text[:1600] + "..."
-        
         # Extract year from dates for metadata
         start_year = None
         end_year = None
@@ -144,10 +140,6 @@ def create_resume_chunks(parsed_resume: ParsedResume, raw_text: str = None) -> L
             project_parts.append(f"Duration: {project.duration}")
         
         project_text = f"Project by {parsed_resume.candidate_name}: " + ". ".join(project_parts)
-        
-        # Truncate if too long (max 400 tokens ≈ 1600 chars)
-        if len(project_text) > 1600:
-            project_text = project_text[:1600] + "..."
         
         chunks.append({
             "type": "project",

@@ -4,6 +4,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import sqlite3
 import json
+from datetime import datetime
 from app.vectorstore.chroma_store import ResumeVectorStore
 from app.vectorstore.embeddings import create_resume_chunks, create_resume_metadata
 from app.models.resume import ParsedResume, WorkExperience, Education, Project
@@ -11,11 +12,11 @@ from app.models.resume import ParsedResume, WorkExperience, Education, Project
 DB_PATH = "resumes.db"
 
 print("=" * 70)
-print("Indexing All Parsed Resumes to Vector Store")
+print("Indexing All Unindexed Parsed Resumes to Vector Store (Incremental)")
 print("=" * 70)
 
-# Step 1: Get ALL parsed resumes from database
-print("\n📂 Loading all parsed resumes from database...")
+# Step 1: Get ONLY unparsed resumes from database (where indexed_at IS NULL)
+print("\n📂 Loading unparsed resumes from database...")
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
@@ -27,22 +28,25 @@ cursor.execute("""
         d.raw_text
     FROM parsed_resumes pr
     JOIN documents d ON pr.document_id = d.document_id
+    WHERE pr.indexed_at IS NULL
+    ORDER BY pr.parsed_at
 """)
 
 results = cursor.fetchall()
 conn.close()
 
 if not results:
-    print("❌ No parsed resumes found. Parse some resumes first!")
-    exit(1)
+    print("❌ No unindexed parsed resumes found.")
+    print("   All resumes may already be indexed or no resumes have been parsed yet.")
+    exit(0)
 
-print(f"✅ Found {len(results)} parsed resumes in database\n")
+print(f"✅ Found {len(results)} unindexed resumes to index\n")
 
 # Step 2: Initialize vector store
 print("💾 Initializing vector store...")
 vector_store = ResumeVectorStore()
 
-# Step 3: Index all resumes
+# Step 3: Index all unindexed resumes
 print("\n🔄 Indexing resumes...")
 indexed_count = 0
 
@@ -92,6 +96,16 @@ for row in results:
             metadata=metadata
         )
         
+        # ✅ UPDATE indexed_at timestamp after successful indexing
+        update_conn = sqlite3.connect(DB_PATH)
+        update_cursor = update_conn.cursor()
+        update_cursor.execute(
+            "UPDATE parsed_resumes SET indexed_at = ? WHERE resume_id = ?",
+            (datetime.now().isoformat(), resume_id)
+        )
+        update_conn.commit()
+        update_conn.close()
+        
         indexed_count += 1
         print(f"   ✅ {indexed_count}. {candidate_name}")
         
@@ -100,34 +114,32 @@ for row in results:
 
 print(f"\n✅ Successfully indexed {indexed_count}/{len(results)} resumes")
 
-# Step 4: Search for GenAI experts
+# Step 4: Verify indexing status
 print("\n" + "=" * 70)
-print("🔍 Searching for GenAI Experts")
+print("📊 Indexing Status Summary")
 print("=" * 70)
 
-queries = [
-    "generative AI expert with stable diffusion image generation experience",
-    "machine learning engineer with GenAI projects",
-    "AI researcher with experience in large language models",
-    "deep learning specialist with generative models",
-]
+conn = sqlite3.connect(DB_PATH)
+cursor = conn.cursor()
 
-for query in queries:
-    print(f"\n📌 Query: '{query}'")
-    results = vector_store.search(query=query, top_k=5)
-    
-    if results['documents'] and len(results['documents'][0]) > 0:
-        print(f"   Found {len(results['documents'][0])} candidates:\n")
-        
-        for i, (doc, meta) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
-            print(f"   {i+1}. {meta.get('candidate_name', 'Unknown')}")
-            print(f"      Role: {meta.get('current_role', meta.get('role', 'Not specified'))}")
-            print(f"      Skills: {meta.get('num_skills', 'N/A')} technical skills")
-            print(f"      Relevant text: {doc[:150]}...")
-            print()
-    else:
-        print("   ❌ No candidates found for this query\n")
+cursor.execute("""
+    SELECT 
+        COUNT(*) as total_parsed,
+        COUNT(CASE WHEN indexed_at IS NOT NULL THEN 1 END) as indexed,
+        COUNT(CASE WHEN indexed_at IS NULL THEN 1 END) as not_indexed
+    FROM parsed_resumes
+""")
 
+total_parsed, indexed, not_indexed = cursor.fetchone()
+conn.close()
+
+print(f"   Total Parsed Resumes: {total_parsed}")
+print(f"   ✅ Indexed: {indexed}")
+print(f"   ⏳ Pending: {not_indexed}")
 print("=" * 70)
-print("✅ Search Complete!")
+
+print("\n📌 To process more resumes:")
+print("   1. Run 'python scripts/text_extraction.py' to extract unextracted PDFs")
+print("   2. Run 'python scripts/test_parser.py' to parse extracted resumes")
+print("   3. Run 'python scripts/index_all_resumes.py' to index parsed resumes")
 print("=" * 70)

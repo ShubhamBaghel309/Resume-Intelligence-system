@@ -1,7 +1,26 @@
 # scripts/process_all_resumes.py
 """
-Complete Resume Processing Pipeline
-Uploads → Parses → Indexes all resumes in one go
+Complete Resume Processing Pipeline - PRODUCTION VERSION
+========================================================
+Processes all resumes in the PDF folder through 4 stages:
+1. Upload PDFs to database
+2. Extract text from PDFs
+3. Parse resumes using LLM (OpenAI GPT-4o-mini)
+4. Index to vector store for semantic search
+
+Features:
+- Incremental processing (skips already processed files)
+- Error handling with detailed reporting
+- Progress tracking and summaries
+- Safe API rate limiting (10 seconds between LLM calls)
+
+Usage:
+    python scripts/process_all_resumes.py
+
+Requirements:
+    - PDFs in: resumedata/resumedata/ folder
+    - OpenAI API key in .env file
+    - Python dependencies from requirements.txt
 """
 
 import sys
@@ -13,11 +32,13 @@ from app.ingestion.extractor import process_batch, extract_text_from_pdf, save_e
 from app.parsing.resume_parser import parse_resume_with_llm, save_parsed_resume
 from app.vectorstore.chroma_store import ResumeVectorStore
 from app.vectorstore.embeddings import create_resume_chunks, create_resume_metadata
-from app.models.resume import ParsedResume
+from app.models.resume import ParsedResume, WorkExperience, Education, Project
+from app.db.init_db import init_db
 import sqlite3
 import json
 from datetime import datetime
 import time
+import os
 
 # ============= CONFIGURATION =============
 PDF_FOLDER = "D:/GEN AI internship work/Resume Intelligence System/resumedata/resumedata"
@@ -27,21 +48,10 @@ VECTOR_STORE_PATH = "storage/chroma"
 # ============= STEP 1: UPLOAD PDFs =============
 def upload_pdfs():
     print("\n" + "="*70)
-    print("📤 STEP 1: UPLOADING PDFs TO DATABASE")
+    print("📤 STEP 1: UPLOADING PDFs TO DATABASE (Incremental)")
     print("="*70)
     
-    # CHECK IF ALREADY UPLOADED
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM documents")
-    existing_count = cursor.fetchone()[0]
-    conn.close()
-    
-    if existing_count > 0:
-        print(f"⚠️  Found {existing_count} documents already in database")
-        print("ℹ️  Skipping upload to avoid duplicates")
-        return "existing_batch"
-    
+    # Get all PDF files in folder
     pdf_files = list(Path(PDF_FOLDER).glob("*.pdf"))
     print(f"📂 Found {len(pdf_files)} PDF files in {PDF_FOLDER}")
     
@@ -49,12 +59,33 @@ def upload_pdfs():
         print("❌ No PDFs found! Check the folder path.")
         return None
     
+    # Check which files are already uploaded
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT original_filename FROM documents")
+    existing_filenames = {row[0] for row in cursor.fetchall()}
+    total_existing = len(existing_filenames)
+    conn.close()
+    
+    # Filter out already-uploaded PDFs
+    new_pdfs = [pdf for pdf in pdf_files if pdf.name not in existing_filenames]
+    
+    if not new_pdfs:
+        print(f"✅ All {len(pdf_files)} PDFs already uploaded!")
+        print(f"ℹ️  Skipping upload - proceeding to next step")
+        return "existing_batch"
+    
+    print(f"✅ Already uploaded: {total_existing} PDFs")
+    print(f"🆕 New PDFs to upload: {len(new_pdfs)}")
+    
     try:
         batch_id = store_uploaded_pdfs(
-            pdf_paths=pdf_files,
+            pdf_paths=new_pdfs,
             recruiter_id="admin_bulk_import"
         )
         print(f"✅ Upload complete! Batch ID: {batch_id}")
+        print(f"   Uploaded: {len(new_pdfs)} new PDFs")
+        print(f"   Total in database: {total_existing + len(new_pdfs)}")
         return batch_id
     except Exception as e:
         print(f"❌ Upload failed: {e}")
@@ -64,7 +95,7 @@ def upload_pdfs():
 # ============= STEP 2: EXTRACT TEXT FROM PDFs =============
 def extract_all_text(batch_id):
     print("\n" + "="*70)
-    print("📄 STEP 2: EXTRACTING TEXT FROM PDFs")
+    print("📄 STEP 2: EXTRACTING TEXT FROM PDFs (Incremental)")
     print("="*70)
     
     conn = sqlite3.connect(DB_PATH)
@@ -74,8 +105,10 @@ def extract_all_text(batch_id):
     cursor.execute("""
         SELECT document_id, file_path, original_filename
         FROM documents
-        WHERE batch_id = ? AND status = 'uploaded'
-    """, (batch_id,))
+        WHERE status = 'uploaded'
+          AND raw_text IS NULL
+        ORDER BY created_at
+    """)
     
     documents = cursor.fetchall()
     conn.close()
@@ -207,7 +240,7 @@ def parse_all_resumes():
 # ============= STEP 3: INDEX TO VECTOR STORE =============
 def index_all_resumes():
     print("\n" + "="*70)
-    print("🔍 STEP 4: INDEXING TO VECTOR STORE")
+    print("🔍 STEP 4: INDEXING TO VECTOR STORE (Incremental)")
     print("="*70)
     
     conn = sqlite3.connect(DB_PATH)
@@ -222,15 +255,15 @@ def index_all_resumes():
             d.raw_text
         FROM parsed_resumes pr
         JOIN documents d ON pr.document_id = d.document_id
-        WHERE d.status = 'parsed'
-        AND pr.indexed_at IS NULL
+        WHERE pr.indexed_at IS NULL
+        ORDER BY pr.parsed_at
     """)
     
     resumes = cursor.fetchall()
     conn.close()
     
     if not resumes:
-        print("ℹ️  No parsed resumes found to index.")
+        print("ℹ️  No unindexed resumes found. All may already be indexed.")
         return 0
     
     print(f"📊 Found {len(resumes)} parsed resumes to index")
@@ -249,6 +282,16 @@ def index_all_resumes():
             # Get skills from single column (all merged)
             skills_list = json.loads(resume_dict['skills']) if resume_dict.get('skills') else []
             
+            # Parse work_experience, education, projects JSON
+            work_exp_data = json.loads(resume_dict['work_experience']) if resume_dict.get('work_experience') else []
+            education_data = json.loads(resume_dict['education']) if resume_dict.get('education') else []
+            projects_data = json.loads(resume_dict['projects']) if resume_dict.get('projects') else []
+            
+            # Reconstruct Pydantic objects
+            work_experience = [WorkExperience(**job) for job in work_exp_data]
+            education = [Education(**edu) for edu in education_data]
+            projects = [Project(**proj) for proj in projects_data]
+            
             # Reconstruct ParsedResume object (skills go into technical_skills, others empty)
             parsed_resume = ParsedResume(
                 candidate_name=resume_dict['candidate_name'],
@@ -261,8 +304,10 @@ def index_all_resumes():
                 frameworks=[],
                 tools=[],
                 technical_skills=skills_list,  # All skills merged here
-                work_experience=json.loads(resume_dict['work_experience']) if resume_dict.get('work_experience') else [],
-                education=json.loads(resume_dict['education']) if resume_dict.get('education') else []
+                work_experience=work_experience,
+                education=education,
+                projects=projects,
+                additional_information=resume_dict.get('additional_information')
             )
             
             # Create chunks with raw text
@@ -285,7 +330,7 @@ def index_all_resumes():
                 metadata=metadata
             )
             
-            # Update indexed_at timestamp
+            # ✅ UPDATE indexed_at timestamp after successful indexing
             update_conn = sqlite3.connect(DB_PATH)
             update_cursor = update_conn.cursor()
             update_cursor.execute(
@@ -317,6 +362,21 @@ def main():
     print("🚀 COMPLETE RESUME PROCESSING PIPELINE")
     print("="*70)
     print(f"📅 Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Step 0: Initialize Database (if not exists)
+    print("\n" + "="*70)
+    print("💾 STEP 0: DATABASE INITIALIZATION")
+    print("="*70)
+    
+    if not os.path.exists(DB_PATH):
+        print("📊 Database not found. Creating new database...")
+        init_db()
+        print("✅ Database initialized successfully!")
+    else:
+        print("✅ Database already exists. Checking tables...")
+        # Verify tables exist by running init_db (uses CREATE TABLE IF NOT EXISTS)
+        init_db()
+        print("✅ Database tables verified!")
     
     # Step 1: Upload
     batch_id = upload_pdfs()
