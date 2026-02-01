@@ -2,12 +2,14 @@
 """
 Interactive Testing Tool for Resume Intelligence Agent
 Shows detailed internal workings: SQL queries, vector searches, filtering logic
+WITH MCP EMAIL SENDING CAPABILITY
 """
 
 import sys
 import os
 import sqlite3
 import json
+import asyncio
 from datetime import datetime
 
 # Add project root to path
@@ -16,6 +18,15 @@ project_root = os.path.dirname(script_dir)
 sys.path.insert(0, project_root)
 
 from app.workflows.intelligent_agent import ResumeIntelligenceAgent
+
+# MCP imports
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    print("⚠️  MCP library not installed. Email sending disabled. Run: uv pip install mcp")
 
 # ============= Configuration =============
 DB_PATH = os.path.join(project_root, "resumes.db")
@@ -134,7 +145,57 @@ def show_database_sample():
     conn.close()
 
 
-def main():
+async def send_interview_invite_mcp(resume_id, job_role, company_name, interview_datetime, 
+                                    interview_location, interviewer_name, tone="professional"):
+    """Send interview invite using MCP server"""
+    
+    if not MCP_AVAILABLE:
+        return {"error": "MCP library not installed"}
+    
+    # Find fastmcp executable - try PATH first, then venv
+    import shutil
+    fastmcp_cmd = shutil.which("fastmcp")
+    if not fastmcp_cmd:
+        venv_fastmcp = os.path.join(project_root, "myenv311", "Scripts", "fastmcp.exe")
+        if os.path.exists(venv_fastmcp):
+            fastmcp_cmd = venv_fastmcp
+        else:
+            return {"error": "fastmcp not found. Run: pip install fastmcp"}
+    
+    server_params = StdioServerParameters(
+        command=fastmcp_cmd,
+        args=["run", os.path.join(project_root, "MCP", "interview_invite_sender.py")],
+        env=None
+    )
+    
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "send_interview_invite",
+                    arguments={
+                        "resume_id": resume_id,
+                        "job_role": job_role,
+                        "company_name": company_name,
+                        "interview_datetime": interview_datetime,
+                        "interview_location": interview_location,
+                        "interviewer_name": interviewer_name,
+                        "tone": tone
+                    }
+                )
+                
+                # Parse MCP result
+                if result.content:
+                    return json.loads(result.content[0].text)
+                return {"error": "No result from MCP server"}
+                
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def main_async():
     logger = DetailedTestLogger()
     
     logger.log_section("INTERACTIVE RESUME INTELLIGENCE AGENT TESTER")
@@ -158,6 +219,8 @@ def main():
     print("  • Try follow-up questions to test context handling")
     print("  • Type 'history' to see conversation history")
     print("  • Type 'stats' to see database statistics")
+    if MCP_AVAILABLE:
+        print("  • Type 'email' to send interview invite")
     print("  • Type 'exit' to quit")
     print("="*80 + "\n")
     
@@ -189,6 +252,47 @@ def main():
                 
             if query.lower() == 'stats':
                 show_database_sample()
+                continue
+            
+            # Check if user wants to send email
+            if query.lower() == 'email':
+                if not MCP_AVAILABLE:
+                    print("\n❌ MCP not available. Run: uv pip install mcp")
+                    continue
+                
+                print("\n📧 SEND INTERVIEW INVITE")
+                print("="*80)
+                
+                resume_id = input("Resume ID: ").strip()
+                job_role = input("Job Role (e.g., Senior Python Developer): ").strip()
+                company_name = input("Company Name: ").strip()
+                interview_datetime = input("Interview Date/Time (e.g., Feb 5, 2026 at 3 PM): ").strip()
+                interview_location = input("Location/Platform (e.g., Google Meet): ").strip()
+                interviewer_name = input("Interviewer Name: ").strip()
+                
+                print("\n⏳ Sending email via MCP server...")
+                result = await send_interview_invite_mcp(
+                    resume_id=resume_id,
+                    job_role=job_role,
+                    company_name=company_name,
+                    interview_datetime=interview_datetime,
+                    interview_location=interview_location,
+                    interviewer_name=interviewer_name
+                )
+                
+                print("\n📬 Email Result:")
+                print("="*80)
+                print(f"Status: {result.get('status', 'unknown')}")
+                print(f"Message: {result.get('message', 'No message')}")
+                if result.get('to'):
+                    print(f"Sent to: {result['to']}")
+                if result.get('subject'):
+                    print(f"Subject: {result['subject']}")
+                if result.get('body'):
+                    print(f"\nEmail Preview:\n{result['body'][:200]}...")
+                print("="*80)
+                
+                logger.log(f"Email sent: {result.get('status')} to {result.get('to')}", "EMAIL")
                 continue
             
             # Execute query
@@ -237,5 +341,15 @@ def main():
     print(f"\n✅ Session log saved to: {LOG_FILE}")
 
 
+def main():
+    """Wrapper to run async main"""
+    asyncio.run(main_async())
+
+
 if __name__ == "__main__":
     main()
+
+
+
+
+

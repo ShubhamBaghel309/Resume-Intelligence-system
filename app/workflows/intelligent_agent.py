@@ -6,13 +6,24 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 import os
+import asyncio
+import shutil
+
+# MCP imports for email sending
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    import json
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
 
 # Import existing components
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from querying.hybrid_search import HybridResumeSearch
+from querying.hybrid_search import HybridResumeSearch 
 from generation.answer_generation import generate_answer
 import sqlite3
 
@@ -37,6 +48,8 @@ class AgentState(TypedDict):
     aggregation_result: float  # Result from aggregation queries (COUNT, AVG, etc.)
     chat_history: list[dict[str, any]]
     conversation_context: dict  # Candidates from previous conversation (for Q&A queries)
+    is_email_action: bool  # Whether this query is requesting to send an email
+    email_sent: bool  # Whether email was successfully sent
 
 
 # ============= Query Analysis Models =============
@@ -79,6 +92,7 @@ class QueryAnalysis(BaseModel):
         "location_based",
         "contact_based",
         "complex_multi_criteria",
+        "email_action",
     ] = Field(description="Primary type of the query")
 
     intent: str = Field(
@@ -621,7 +635,17 @@ STEP 5: SQL COMPLEXITY DECISION
 Set sql_complexity_reason to explain your decision.
 
 ════════════════════════════════
-STEP 6: Q&A QUERY DETECTION
+STEP 6: EMAIL ACTION DETECTION
+════════════════════════════════
+**Set query_type = "email_action"** if query asks to SEND EMAIL/INTERVIEW INVITE:
+- "Send interview email to X"
+- "Send invitation to shubham@example.com"
+- "Email interview invite to candidate X"
+
+Extract candidate name/email to entities.
+
+════════════════════════════════
+STEP 7: Q&A QUERY DETECTION
 ════════════════════════════════
 **Set is_qa_query = True** if query asks to ANALYZE/EXPLAIN/SUGGEST based on previous context WITHOUT needing new database search:
 
@@ -653,6 +677,10 @@ These queries use data from PREVIOUS conversation context - NO database search n
         state["search_strategy"] = analysis.search_strategy
         state["sql_filters"] = analysis.filters.model_dump()
         state["use_llm_sql"] = analysis.use_llm_sql  # Set flag from analysis
+        
+        # Detect email sending action
+        state["is_email_action"] = (analysis.query_type == "email_action")
+        state["email_sent"] = False
 
         print(f"\n🧠 QUERY ANALYSIS:")
         print(f"   Type: {analysis.query_type}")
@@ -1362,6 +1390,276 @@ def fetch_context_candidates_node(state: AgentState) -> AgentState:
     return state
 
 
+def send_email_via_mcp_node(state: AgentState) -> AgentState:
+    """
+    Node: Send interview invite email via MCP server
+    
+    This node acts as an MCP client and calls the interview_invite_sender.py server
+    Handles:
+    - Candidates from database search
+    - External emails (not in database) - sends directly to provided email
+    - Looks up email from database if not provided
+    """
+    
+    if not MCP_AVAILABLE:
+        state["answer"] = "❌ MCP library not installed. Email sending is not available. Run: pip install mcp"
+        return state
+    
+    print("\n📧 SENDING INTERVIEW INVITE VIA MCP...")
+    
+    # Check if an email was explicitly mentioned in the query
+    query_analysis = state.get("query_analysis", {})
+    entities = query_analysis.get("entities", {})
+    mentioned_email = entities.get("email")
+    mentioned_name = entities.get("names", [None])[0] if entities.get("names") else None
+    
+    # Check if we found candidates in database
+    candidates = state.get("final_results", [])
+    
+    # CASE 1: Email mentioned but NO candidates found in database → External email
+    if mentioned_email and len(candidates) == 0:
+        print(f"   📧 External email detected: {mentioned_email}")
+        print(f"   👤 Not in database - will send directly to this address")
+        
+        # Create a temporary candidate entry for external email
+        candidates = [{
+            "resume_id": "external_" + mentioned_email.replace("@", "_at_"),
+            "candidate_name": mentioned_name or "Candidate",
+            "email": mentioned_email,
+            "skills": "",
+            "total_experience_years": 0,
+            "current_role": "External Candidate"
+        }]
+        num_candidates = 1
+    # CASE 2: Email mentioned AND candidates found → Verify it matches
+    elif mentioned_email and len(candidates) > 0:
+        # Check if the mentioned email matches any candidate
+        matching_candidate = next((c for c in candidates if c.get("email") == mentioned_email), None)
+        
+        if not matching_candidate:
+            # Email doesn't match database candidates - this is confusing
+            # Prioritize the explicitly mentioned email over search results
+            print(f"   ⚠️  Email '{mentioned_email}' doesn't match search results")
+            print(f"   📧 Sending to explicitly mentioned email instead")
+            candidates = [{
+                "resume_id": "external_" + mentioned_email.replace("@", "_at_"),
+                "candidate_name": mentioned_name or "Candidate",
+                "email": mentioned_email,
+                "skills": "",
+                "total_experience_years": 0,
+                "current_role": "External Candidate"
+            }]
+            num_candidates = 1
+        else:
+            # Email matches - use that specific candidate only
+            candidates = [matching_candidate]
+            num_candidates = 1
+    # CASE 3: No email mentioned, use search results
+    else:
+        if len(candidates) == 0:
+            state["answer"] = "❌ No candidate found. Please specify a candidate name or email address."
+            return state
+        num_candidates = len(candidates)
+    
+    print(f"   📋 Found {num_candidates} candidate(s) to email")
+    
+    # If multiple candidates, confirm and send to all
+    if num_candidates > 1:
+        print(f"   ⚠️  Sending emails to {num_candidates} candidates...")
+    
+    
+    # Extract job details from query using LLM
+    print(f"   📋 Extracting interview details from query...")
+    
+    extraction_prompt = ChatPromptTemplate.from_messages([
+        ("system", """Extract interview details from the query. If not specified, use defaults:
+- job_role: "Software Developer" (or infer from context like "ML internship" → "Machine Learning Intern")
+- company_name: "Our Company"
+- interview_datetime: "To be scheduled"
+- interview_location: "Google Meet"
+- interviewer_name: "HR Team"
+"""),
+        ("user", "Query: {query}\n\nExtract: job_role, company_name, interview_datetime, interview_location, interviewer_name")
+    ])
+    
+    class InterviewDetails(BaseModel):
+        job_role: str = Field(default="Software Developer")
+        company_name: str = Field(default="Our Company")
+        interview_datetime: str = Field(default="To be scheduled")
+        interview_location: str = Field(default="Google Meet")
+        interviewer_name: str = Field(default="HR Team")
+    
+    try:
+        details_chain = extraction_prompt | llm.with_structured_output(InterviewDetails)
+        details = details_chain.invoke({"query": state["query"]})
+        
+        print(f"   💼 Role: {details.job_role}")
+        print(f"   🏢 Company: {details.company_name}")
+        print(f"   📅 Date/Time: {details.interview_datetime}")
+        print(f"   📍 Location: {details.interview_location}")
+        
+        # Send email to each candidate
+        results = []
+        for idx, candidate in enumerate(candidates, 1):
+            resume_id = candidate.get("resume_id")
+            candidate_name = candidate.get("candidate_name", "Unknown")
+            candidate_email = candidate.get("email")
+            
+            # Check if candidate has email
+            if not candidate_email or candidate_email == "Not available":
+                print(f"   ❌ Skipping {candidate_name}: No email found")
+                results.append({
+                    "candidate": candidate_name,
+                    "status": "skipped",
+                    "reason": "No email address"
+                })
+                continue
+            
+            print(f"\n   📤 [{idx}/{num_candidates}] Sending to {candidate_name} ({candidate_email})...")
+            
+            # Call MCP server - check if event loop is running
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an async context, need to create a new thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        asyncio.run,
+                        call_mcp_email_server(
+                            resume_id=resume_id,
+                            job_role=details.job_role,
+                            company_name=details.company_name,
+                            interview_datetime=details.interview_datetime,
+                            interview_location=details.interview_location,
+                            interviewer_name=details.interviewer_name
+                        )
+                    )
+                    result = future.result()
+            except RuntimeError:
+                # No event loop running, safe to use asyncio.run
+                result = asyncio.run(call_mcp_email_server(
+                    resume_id=resume_id,
+                    job_role=details.job_role,
+                    company_name=details.company_name,
+                    interview_datetime=details.interview_datetime,
+                    interview_location=details.interview_location,
+                    interviewer_name=details.interviewer_name
+                ))
+            
+            if result.get("status") == "sent":
+                email_to = result.get("to", candidate_email)
+                print(f"      ✅ Sent to {email_to}")
+                results.append({
+                    "candidate": candidate_name,
+                    "email": email_to,
+                    "status": "sent",
+                    "subject": result.get("subject", "")
+                })
+            else:
+                error_msg = result.get("message", "Unknown error")
+                print(f"      ❌ Failed: {error_msg}")
+                results.append({
+                    "candidate": candidate_name,
+                    "email": candidate_email,
+                    "status": "failed",
+                    "reason": error_msg
+                })
+        
+        # Generate summary answer
+        sent_count = sum(1 for r in results if r["status"] == "sent")
+        failed_count = sum(1 for r in results if r["status"] == "failed")
+        skipped_count = sum(1 for r in results if r["status"] == "skipped")
+        
+        if sent_count > 0:
+            state["email_sent"] = True
+            answer_parts = [f"✅ **Interview invitations sent to {sent_count} candidate(s)!**\n"]
+            answer_parts.append(f"📧 **Email Details:**")
+            answer_parts.append(f"- Role: {details.job_role}")
+            answer_parts.append(f"- Company: {details.company_name}")
+            answer_parts.append(f"- Interview: {details.interview_datetime}")
+            answer_parts.append(f"- Location: {details.interview_location}\n")
+            
+            answer_parts.append(f"**Sent to:**")
+            for r in results:
+                if r["status"] == "sent":
+                    answer_parts.append(f"  ✅ {r['candidate']} ({r['email']})")
+            
+            if failed_count > 0:
+                answer_parts.append(f"\n**Failed ({failed_count}):**")
+                for r in results:
+                    if r["status"] == "failed":
+                        answer_parts.append(f"  ❌ {r['candidate']}: {r['reason']}")
+            
+            if skipped_count > 0:
+                answer_parts.append(f"\n**Skipped ({skipped_count}):**")
+                for r in results:
+                    if r["status"] == "skipped":
+                        answer_parts.append(f"  ⚠️  {r['candidate']}: {r['reason']}")
+            
+            state["answer"] = "\n".join(answer_parts)
+        else:
+            state["answer"] = f"❌ Failed to send emails. {failed_count} failed, {skipped_count} skipped (no email)."
+            
+    except Exception as e:
+        state["answer"] = f"❌ Error sending email: {str(e)}"
+        print(f"   ❌ Error: {str(e)}")
+    
+    return state
+
+
+async def call_mcp_email_server(
+    resume_id: str,
+    job_role: str,
+    company_name: str,
+    interview_datetime: str,
+    interview_location: str,
+    interviewer_name: str,
+    tone: str = "professional"
+):
+    """Call the MCP interview_invite_sender.py server"""
+    
+    # Find fastmcp executable
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    fastmcp_cmd = shutil.which("fastmcp")
+    if not fastmcp_cmd:
+        venv_fastmcp = os.path.join(project_root, "myenv311", "Scripts", "fastmcp.exe")
+        if os.path.exists(venv_fastmcp):
+            fastmcp_cmd = venv_fastmcp
+        else:
+            return {"status": "error", "message": "fastmcp not found"}
+    
+    server_params = StdioServerParameters(
+        command=fastmcp_cmd,
+        args=["run", os.path.join(project_root, "MCP", "interview_invite_sender.py")],
+        env=None
+    )
+    
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                
+                result = await session.call_tool(
+                    "send_interview_invite",
+                    arguments={
+                        "resume_id": resume_id,
+                        "job_role": job_role,
+                        "company_name": company_name,
+                        "interview_datetime": interview_datetime,
+                        "interview_location": interview_location,
+                        "interviewer_name": interviewer_name,
+                        "tone": tone
+                    }
+                )
+                
+                if result.content:
+                    return json.loads(result.content[0].text)
+                return {"status": "error", "message": "No result from MCP server"}
+                
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 def generate_answer_node(state: AgentState) -> AgentState:
     """
     Node 5: Generate natural language answer using LLM
@@ -1576,20 +1874,28 @@ def create_intelligent_agent() -> StateGraph:
     workflow.add_node("vector_search", vector_search_node)
     workflow.add_node("enrich_results", enrich_results_node)
     workflow.add_node("fetch_context_candidates", fetch_context_candidates_node)  # NEW: For Q&A queries
+    workflow.add_node("send_email", send_email_via_mcp_node)  # NEW: For email actions
     workflow.add_node("generate_answer", generate_answer_node)
 
     # Define edges
     workflow.set_entry_point("analyze_query")
     
     # Add conditional routing after analysis
+    # - If email action → search for candidate, then send email
     # - If Q&A query → fetch candidates from context, then generate answer
     # - Otherwise → proceed to SQL filtering
     def route_after_analysis(state: AgentState) -> Literal["sql_filter", "fetch_context_candidates"]:
-        """Route based on whether this is a Q&A query or search query"""
+        """Route based on query type"""
+        # Email action: search for candidate first
+        if state.get("is_email_action", False):
+            return "sql_filter"  # Find candidate, then send email
+        
+        # Q&A query: use context
         analysis = state.get("query_analysis", {})
         if analysis.get("is_qa_query", False):
             return "fetch_context_candidates"  # Fetch context candidates, then answer
-        return "sql_filter"
+        
+        return "sql_filter"  # Normal search
     
     workflow.add_conditional_edges(
         "analyze_query",
@@ -1603,7 +1909,22 @@ def create_intelligent_agent() -> StateGraph:
     workflow.add_edge("sql_filter", "llm_sql_generation")  # Try LLM SQL if needed
     workflow.add_edge("llm_sql_generation", "vector_search")
     workflow.add_edge("vector_search", "enrich_results")
-    workflow.add_edge("enrich_results", "generate_answer")
+    
+    # After enriching results, check if email action
+    def route_after_enrich(state: AgentState) -> Literal["send_email", "generate_answer"]:
+        """Route to email sending if email action, otherwise generate answer"""
+        if state.get("is_email_action", False) and not state.get("email_sent", False):
+            return "send_email"
+        return "generate_answer"
+    
+    workflow.add_conditional_edges(
+        "enrich_results",
+        route_after_enrich,
+        {"send_email": "send_email", "generate_answer": "generate_answer"}
+    )
+    
+    # Email sent → END (answer already generated in email node)
+    workflow.add_edge("send_email", END)
 
     # Conditional retry logic
     workflow.add_conditional_edges(
