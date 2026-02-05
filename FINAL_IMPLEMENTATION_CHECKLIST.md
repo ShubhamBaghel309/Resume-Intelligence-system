@@ -12,7 +12,7 @@
 
 **Alternative Titles:**
 - "XAI-Driven Adaptive Search: Explainable Query Routing with Parallel Hybrid SQL-Vector Retrieval"
-- "Scalable Multi-Domain Document Retrieval via Parallel Hybrid SQL-Vector Search with Explainability"
+- "Scalable Multi-Domain Document Retrieval via Parallel Hybrid SQL-Vector Search with Explainabilityy"
 
 ### **Target Venues**
 - **Primary:** IEEE Access (Open Access, Fast Review)
