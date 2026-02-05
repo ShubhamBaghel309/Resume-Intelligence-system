@@ -944,8 +944,17 @@ def sql_filter_node(state: AgentState) -> AgentState:
                 if len(skill_groups) > 1:
                     print(f"   🔍 Normal mode: Matching ANY of {len(skill_groups)} skills (OR logic)")
 
+    # ✅ CRITICAL FIX: For email_action queries with explicit names,
+    # do NOT apply job_title/company filters - those are for EMAIL CONTENT, not candidate search
+    is_email_action = state.get("is_email_action", False)
+    should_skip_job_filters = is_email_action and has_explicit_names
+    
+    if should_skip_job_filters:
+        print(f"   📧 Email action with explicit names: Ignoring job/company filters (used for email content only)")
+
     # Job title filter (searches in work_experience JSON and current_role)
-    if filters.get("job_title"):
+    # Skip if email action with explicit names
+    if filters.get("job_title") and not should_skip_job_filters:
         job_title = filters["job_title"]
         # Search in both work_experience JSON and current_role column
         where_clauses.append("(work_experience LIKE ? OR current_role LIKE ?)")
@@ -953,7 +962,8 @@ def sql_filter_node(state: AgentState) -> AgentState:
         params.append(f"%{job_title}%")
 
     # Company filter (searches in work_experience JSON)
-    if filters.get("company"):
+    # Skip if email action with explicit names
+    if filters.get("company") and not should_skip_job_filters:
         where_clauses.append("work_experience LIKE ?")
         params.append(f"%{filters['company']}%")
 
@@ -1074,11 +1084,27 @@ def llm_sql_generation_node(state: AgentState) -> AgentState:
     # Check if this is an aggregation query
     analysis = state.get("query_analysis", {})
     is_aggregation = analysis.get("is_aggregation_query", False)
+    is_email_action = state.get("is_email_action", False)
+    
+    # Check if query has explicit names (for email actions)
+    entities = analysis.get("entities", {})
+    has_explicit_names = bool(entities.get("names"))
     
     if is_aggregation:
         select_instruction = "2. For aggregation queries (how many, count, average), use COUNT(*), AVG(), SUM(), MAX(), MIN() - NOT resume_id"
     else:
         select_instruction = "2. Always SELECT resume_id for candidate search queries"
+    
+    # Add special instruction for email actions
+    email_action_note = ""
+    if is_email_action and has_explicit_names:
+        email_action_note = f"""
+⚠️ CRITICAL: This is an EMAIL ACTION query with explicit candidate names.
+- Names mentioned: {', '.join(entities.get('names', []))}
+- ONLY filter by candidate names using OR logic: (candidate_name LIKE '%Name1%' OR candidate_name LIKE '%Name2%')
+- IGNORE any job titles, companies, or skills mentioned - those are for EMAIL CONTENT, not filtering
+- Example: "Send email to John and Mary for ML Intern at Google" → Only filter by John OR Mary (ignore "ML Intern" and "Google")
+"""
     
     sql_generation_prompt = f"""
 You are a SQL expert. Generate a SQLite query to answer this user question.
@@ -1087,6 +1113,8 @@ DATABASE SCHEMA:
 {schema_info}
 
 USER QUESTION: {state["query"]}
+
+{email_action_note}
 
 RULES:
 1. ONLY return the SQL query, nothing else
@@ -1112,6 +1140,11 @@ CANDIDATE SEARCH QUERIES (return resume_id):
 - "MBA graduates" → SELECT resume_id FROM parsed_resumes WHERE education LIKE '%MBA%'
 - "worked at Google" → SELECT resume_id FROM parsed_resumes WHERE work_experience LIKE '%Google%'
 - "Python developers with 5+ years from IIT" → SELECT resume_id FROM parsed_resumes WHERE skills LIKE '%Python%' AND total_experience_years >= 5 AND education LIKE '%IIT%'
+
+EMAIL ACTION QUERIES (filter by names ONLY - ignore job/company details):
+- "Send email to Shubham Baghel and Anshika Chaudhary for ML Intern at Google" → SELECT resume_id FROM parsed_resumes WHERE (candidate_name LIKE '%Shubham%' AND candidate_name LIKE '%Baghel%') OR (candidate_name LIKE '%Anshika%' AND candidate_name LIKE '%Chaudhary%')
+- "Email John Smith for Software Engineer position" → SELECT resume_id FROM parsed_resumes WHERE candidate_name LIKE '%John%' AND candidate_name LIKE '%Smith%'
+- CRITICAL: Use proper parentheses for OR logic! Each full name in its own parentheses: (Name1_Part1 AND Name1_Part2) OR (Name2_Part1 AND Name2_Part2)
 
 AGGREGATION QUERIES (return COUNT/AVG/SUM/MAX/MIN):
 - "How many Python developers?" → SELECT COUNT(*) FROM parsed_resumes WHERE skills LIKE '%Python%'
@@ -1472,31 +1505,71 @@ def send_email_via_mcp_node(state: AgentState) -> AgentState:
     print(f"   📋 Extracting interview details from query...")
     
     extraction_prompt = ChatPromptTemplate.from_messages([
-        ("system", """Extract interview details from the query. If not specified, use defaults:
-- job_role: "Software Developer" (or infer from context like "ML internship" → "Machine Learning Intern")
-- company_name: "Our Company"
-- interview_datetime: "To be scheduled"
-- interview_location: "Google Meet"
-- interviewer_name: "HR Team"
-"""),
+        ("system", """Extract interview details from the query. 
+        
+IMPORTANT: Only extract information that is EXPLICITLY mentioned. 
+If a field is not specified, return null/None.
+
+Fields to extract:
+- job_role: The position being hired for (e.g., "Machine Learning Intern", "Software Developer")
+- company_name: The company conducting the interview (e.g., "Google", "Microsoft", "ABC Corp")
+- interview_datetime: The date and time of interview (e.g., "March 15, 2026 at 2:00 PM", "Tomorrow at 10 AM")
+- interview_location: Where the interview will be held (e.g., "Building A Room 301", "Zoom link: https://...", "Google Meet")
+- interviewer_name: Person conducting the interview (e.g., "Dr. Sharma", "John Smith", "HR Team")
+
+Return null for any field not explicitly mentioned in the query."""),
         ("user", "Query: {query}\n\nExtract: job_role, company_name, interview_datetime, interview_location, interviewer_name")
     ])
     
     class InterviewDetails(BaseModel):
-        job_role: str = Field(default="Software Developer")
-        company_name: str = Field(default="Our Company")
-        interview_datetime: str = Field(default="To be scheduled")
-        interview_location: str = Field(default="Google Meet")
-        interviewer_name: str = Field(default="HR Team")
+        job_role: str | None = Field(default=None)
+        company_name: str | None = Field(default=None)
+        interview_datetime: str | None = Field(default=None)
+        interview_location: str | None = Field(default=None)
+        interviewer_name: str | None = Field(default=None)
     
     try:
         details_chain = extraction_prompt | llm.with_structured_output(InterviewDetails)
         details = details_chain.invoke({"query": state["query"]})
         
+        # ✅ VALIDATION: Check all required fields are present
+        missing_fields = []
+        field_examples = {
+            "job_role": "e.g., 'Machine Learning Intern', 'Software Developer', 'Data Scientist'",
+            "company_name": "e.g., 'Google', 'Microsoft', 'ABC Corporation'",
+            "interview_datetime": "e.g., 'March 15, 2026 at 2:00 PM', 'Tomorrow at 10 AM', 'Next Monday 3 PM'",
+            "interview_location": "e.g., 'Building A Room 301', 'Online via Google Meet', 'Zoom link: https://...'",
+            "interviewer_name": "e.g., 'Dr. Sharma', 'John Smith', 'Sarah Johnson from HR'"
+        }
+        
+        if not details.job_role:
+            missing_fields.append(f"❌ **job_role** - {field_examples['job_role']}")
+        if not details.company_name:
+            missing_fields.append(f"❌ **company_name** - {field_examples['company_name']}")
+        if not details.interview_datetime:
+            missing_fields.append(f"❌ **interview_datetime** - {field_examples['interview_datetime']}")
+        if not details.interview_location:
+            missing_fields.append(f"❌ **interview_location** - {field_examples['interview_location']}")
+        if not details.interviewer_name:
+            missing_fields.append(f"❌ **interviewer_name** - {field_examples['interviewer_name']}")
+        
+        # If any field is missing, return error and ask user to provide them
+        if missing_fields:
+            error_message = "❌ **Cannot send interview invitations. Missing required information:**\n\n"
+            error_message += "\n".join(missing_fields)
+            error_message += "\n\n💡 **Please provide all the above details in your message and try again.**"
+            
+            state["answer"] = error_message
+            print(f"   ⚠️  Missing fields detected. Asking user for complete information.")
+            return state
+        
+        # All fields present - proceed with sending emails
+        print(f"   ✅ All required fields present!")
         print(f"   💼 Role: {details.job_role}")
         print(f"   🏢 Company: {details.company_name}")
         print(f"   📅 Date/Time: {details.interview_datetime}")
         print(f"   📍 Location: {details.interview_location}")
+        print(f"   👤 Interviewer: {details.interviewer_name}")
         
         # Send email to each candidate
         results = []
