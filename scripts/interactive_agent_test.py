@@ -209,6 +209,7 @@ async def main_async():
     
     # Session will be created automatically on first query
     session_id = None
+    conversation_context = {}  # ✅ Persist across turns for email field collection
     logger.log("Agent initialized (session will be created on first query)", "SETUP")
     
     print("\n" + "="*80)
@@ -225,11 +226,16 @@ async def main_async():
     print("="*80 + "\n")
     
     query_count = 0
+    next_query = None  # ✅ For email field continuation
     
     while True:
         try:
-            # Get user input
-            query = input("\n🔍 Your Query: ").strip()
+            # Use pending query from email field flow, or prompt fresh input
+            if next_query:
+                query = next_query
+                next_query = None
+            else:
+                query = input("\n🔍 Your Query: ").strip()
             
             if not query:
                 continue
@@ -302,23 +308,58 @@ async def main_async():
             # Show what we're doing
             logger.log("Sending to agent...", "EXEC")
             
-            # Get answer - returns a dict with answer, session_id, candidate_ids
-            # verbose=True shows internal workflow, but we only want the final answer
-            result = agent.query(query, session_id, verbose=True)
+            # Get answer - pass conversation_context for email field persistence
+            result = agent.query(query, session_id, verbose=True, conversation_context=conversation_context)
             
-            # Update session_id for next query
+            # Update session_id and conversation_context for next query
             session_id = result['session_id']
+            conversation_context = result.get('conversation_context', {})
             answer = result['answer']
             
-            # Display answer (verbose already printed it, so skip redundant prints)
-            # The verbose output already shows the answer at the end
-            
-            # Log to file only (not to console - verbose mode already printed everything)
+            # Log to file only (verbose mode already printed everything to console)
             logger.log_file.write(f"[{datetime.now().strftime('%H:%M:%S')}] QUERY: {query}\n")
             logger.log_file.write(f"[{datetime.now().strftime('%H:%M:%S')}] SESSION: {session_id}, CANDIDATES: {len(result.get('candidate_ids', []))}\n\n")
             logger.log_file.flush()
             
-            # Prompt for feedback
+            # ✅ If agent is collecting email fields, collect ALL fields via form-style input
+            if conversation_context.get("pending_email_action"):
+                pending = conversation_context["pending_email_action"]
+                missing = pending.get("missing_fields", [])
+                
+                field_prompts = {
+                    "job_role": "Job Role",
+                    "company_name": "Company Name",
+                    "interview_datetime": "Interview Date & Time",
+                    "interview_location": "Interview Location",
+                    "interviewer_name": "Interviewer Name"
+                }
+                
+                print("\n" + "-"*50)
+                print("📝 Fill in the details below (press Enter after each):")
+                print("-"*50)
+                
+                collected = {}
+                for i, field_key in enumerate(missing, 1):
+                    prompt_label = field_prompts.get(field_key, field_key)
+                    value = input(f"  {i}. {prompt_label}: ").strip()
+                    if value.lower() == 'exit':
+                        break
+                    collected[field_key] = value
+                
+                if len(collected) == len(missing):
+                    # Build a complete query string with all fields for the agent
+                    parts = []
+                    for field_key, value in collected.items():
+                        parts.append(f"{field_prompts[field_key]}: {value}")
+                    next_query = ", ".join(parts)
+                    print(f"\n⏳ Sending all details to agent...")
+                    continue
+                else:
+                    print("\n❌ Email cancelled.")
+                    conversation_context = {}  # Clear pending action
+                    continue
+            
+            # Normal flow - ask for feedback
             print("\n💭 Was this response satisfactory? (y/n/comment): ", end="")
             feedback = input().strip()
             if feedback and feedback.lower() != 'y':

@@ -109,7 +109,7 @@ class QueryAnalysis(BaseModel):
         description="Structured filters: min_experience, max_experience, etc."
     )
 
-    search_strategy: Literal["sql_first", "vector_first", "hybrid", "sql_only"] = Field(
+    search_strategy: Literal["sql_only", "vector_first", "hybrid"] = Field(
         description="Recommended search strategy based on query analysis"
     )
 
@@ -513,7 +513,7 @@ YOUR TASK
 ────────────────────────────────
 1. Extract entities (names, skills, locations, etc.) from the query
 2. Classify the query type (skill_based, education_based, etc.)
-3. Choose the search strategy (sql_only, sql_first, vector_first, hybrid)
+3. Choose the search strategy (sql_only, vector_first, hybrid)
 4. Decide if LLM-generated SQL is needed (use_llm_sql flag)
 
 ────────────────────────────────
@@ -592,14 +592,11 @@ Choose ONE primary type:
 ════════════════════════════════
 STEP 4: CHOOSE SEARCH STRATEGY
 ════════════════════════════════
-**sql_only** - Exact matches only, return ALL SQL results:
+**sql_only** - Exact matches using SQL, return ALL results:
 - Name/phone/email lookup: "Find John Smith", "phone 8374106843"
 - Education lookup: "IIT graduates", "MBA from NIT"
-- Use when: No semantic ranking needed
-
-**sql_first** - Filter with SQL, return ALL matches:
 - Multi-criteria: "Python developers with 5+ years in Bangalore"
-- Use when: Clear filters, want all matches (not just top 10)
+- Use when: Clear filters, no semantic ranking needed, want ALL matches
 
 **vector_first** - Semantic search ONLY (no SQL filtering):
 - Subjective keywords: "rare", "unique", "interesting", "innovative", "creative", "impressive", "exceptional"
@@ -680,6 +677,13 @@ These queries use data from PREVIOUS conversation context - NO database search n
         
         # Detect email sending action
         state["is_email_action"] = (analysis.query_type == "email_action")
+        
+        # ✅ CRITICAL: If there's a pending email action, treat current query as email action continuation
+        conversation_context = state.get("conversation_context", {})
+        if conversation_context.get("pending_email_action"):
+            state["is_email_action"] = True
+            print(f"   📧 Detected pending email action - treating current query as field completion")
+        
         state["email_sent"] = False
 
         print(f"\n🧠 QUERY ANALYSIS:")
@@ -700,7 +704,7 @@ These queries use data from PREVIOUS conversation context - NO database search n
             print(f"   ⚡ SQL Mode: Hardcoded filters")
         
         # Explain what will happen based on strategy
-        if analysis.search_strategy in ["sql_only", "sql_first"]:
+        if analysis.search_strategy == "sql_only":
             print(f"   📊 Result source: SQL (all matching candidates, no vector limit)")
         elif analysis.search_strategy == "vector_first":
             print(f"   🔍 Result source: Vector search (top 10 semantic matches)")
@@ -724,7 +728,7 @@ def sql_filter_node(state: AgentState) -> AgentState:
     """
     Node 2: Execute SQL filtering based on extracted entities
 
-    Only runs if strategy requires SQL (sql_first, sql_only, hybrid)
+    Only runs if strategy requires SQL (sql_only, hybrid)
     Routes to LLM SQL if query analysis indicates complexity
     """
 
@@ -1133,7 +1137,7 @@ RULES:
 EXAMPLES:
 
 CANDIDATE SEARCH QUERIES (return resume_id):
-- "whose contact is 8374106843" → SELECT resume_id FROM parsed_resumes WHERE REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '+', '') LIKE '%8374106843%'
+- "whose contact is 8374106843" → SELECT resume_id FROM parsed_resumes WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, '-', ''), ' ', ''), '(', ''), ')', ''), '+', '') LIKE '%8374106843%'
 - "find email john@example.com" → SELECT resume_id FROM parsed_resumes WHERE email LIKE '%john@example.com%'
 - "candidates with Python" → SELECT resume_id FROM parsed_resumes WHERE skills LIKE '%Python%'
 - "who studied at IIT Delhi" → SELECT resume_id FROM parsed_resumes WHERE education LIKE '%IIT Delhi%'
@@ -1216,7 +1220,7 @@ def vector_search_node(state: AgentState) -> AgentState:
     Node 3: Execute vector search with optional metadata filtering
 
     CRITICAL LOGIC:
-    - sql_only/sql_first: Skip vector search, use SQL results directly (SQL is authoritative)
+    - sql_only: Skip vector search, use SQL results directly (SQL is authoritative)
     - vector_first: Use vector search with optional SQL filters (semantic ranking needed)
     - hybrid: Use vector search with SQL filters (combine exact + semantic)
     """
@@ -1228,9 +1232,9 @@ def vector_search_node(state: AgentState) -> AgentState:
         state["search_results"] = {}
         return state
 
-    # For sql_only or sql_first strategies with SQL results, skip vector search entirely
+    # For sql_only strategy with SQL results, skip vector search entirely
     # Vector search would only reduce the results (top_k limitation)
-    if state["search_strategy"] in ["sql_only", "sql_first"] and state["candidate_ids"]:
+    if state["search_strategy"] == "sql_only" and state["candidate_ids"]:
         print(f"\n🔍 SKIPPING VECTOR SEARCH ({state['search_strategy']} strategy)")
         print(f"   ✅ Using ALL {len(state['candidate_ids'])} candidates from SQL directly")
         print(f"   💡 Vector search would reduce results due to top_k limit")
@@ -1425,85 +1429,26 @@ def fetch_context_candidates_node(state: AgentState) -> AgentState:
 
 def send_email_via_mcp_node(state: AgentState) -> AgentState:
     """
-    Node: Send interview invite email via MCP server
+    Node: Send interview invite email via MCP server with conversational field collection
     
-    This node acts as an MCP client and calls the interview_invite_sender.py server
-    Handles:
-    - Candidates from database search
-    - External emails (not in database) - sends directly to provided email
-    - Looks up email from database if not provided
+    NEW BEHAVIOR:
+    - If fields are missing in first request, asks user for them
+    - User provides missing fields in follow-up message
+    - Agent automatically extracts and merges fields
+    - Sends email once all 5 fields are complete
     """
     
     if not MCP_AVAILABLE:
         state["answer"] = "❌ MCP library not installed. Email sending is not available. Run: pip install mcp"
         return state
     
-    print("\n📧 SENDING INTERVIEW INVITE VIA MCP...")
+    print("\n📧 PROCESSING EMAIL ACTION...")
     
-    # Check if an email was explicitly mentioned in the query
-    query_analysis = state.get("query_analysis", {})
-    entities = query_analysis.get("entities", {})
-    mentioned_email = entities.get("email")
-    mentioned_name = entities.get("names", [None])[0] if entities.get("names") else None
+    # ============= STEP 1: Check for pending email action from previous conversation =============
+    conversation_context = state.get("conversation_context", {})
+    pending_email = conversation_context.get("pending_email_action")
     
-    # Check if we found candidates in database
-    candidates = state.get("final_results", [])
-    
-    # CASE 1: Email mentioned but NO candidates found in database → External email
-    if mentioned_email and len(candidates) == 0:
-        print(f"   📧 External email detected: {mentioned_email}")
-        print(f"   👤 Not in database - will send directly to this address")
-        
-        # Create a temporary candidate entry for external email
-        candidates = [{
-            "resume_id": "external_" + mentioned_email.replace("@", "_at_"),
-            "candidate_name": mentioned_name or "Candidate",
-            "email": mentioned_email,
-            "skills": "",
-            "total_experience_years": 0,
-            "current_role": "External Candidate"
-        }]
-        num_candidates = 1
-    # CASE 2: Email mentioned AND candidates found → Verify it matches
-    elif mentioned_email and len(candidates) > 0:
-        # Check if the mentioned email matches any candidate
-        matching_candidate = next((c for c in candidates if c.get("email") == mentioned_email), None)
-        
-        if not matching_candidate:
-            # Email doesn't match database candidates - this is confusing
-            # Prioritize the explicitly mentioned email over search results
-            print(f"   ⚠️  Email '{mentioned_email}' doesn't match search results")
-            print(f"   📧 Sending to explicitly mentioned email instead")
-            candidates = [{
-                "resume_id": "external_" + mentioned_email.replace("@", "_at_"),
-                "candidate_name": mentioned_name or "Candidate",
-                "email": mentioned_email,
-                "skills": "",
-                "total_experience_years": 0,
-                "current_role": "External Candidate"
-            }]
-            num_candidates = 1
-        else:
-            # Email matches - use that specific candidate only
-            candidates = [matching_candidate]
-            num_candidates = 1
-    # CASE 3: No email mentioned, use search results
-    else:
-        if len(candidates) == 0:
-            state["answer"] = "❌ No candidate found. Please specify a candidate name or email address."
-            return state
-        num_candidates = len(candidates)
-    
-    print(f"   📋 Found {num_candidates} candidate(s) to email")
-    
-    # If multiple candidates, confirm and send to all
-    if num_candidates > 1:
-        print(f"   ⚠️  Sending emails to {num_candidates} candidates...")
-    
-    
-    # Extract job details from query using LLM
-    print(f"   📋 Extracting interview details from query...")
-    
+    # ============= STEP 2: Extract fields from CURRENT query =============
     extraction_prompt = ChatPromptTemplate.from_messages([
         ("system", """Extract interview details from the query. 
         
@@ -1530,70 +1475,161 @@ Return null for any field not explicitly mentioned in the query."""),
     
     try:
         details_chain = extraction_prompt | llm.with_structured_output(InterviewDetails)
-        details = details_chain.invoke({"query": state["query"]})
+        current_fields = details_chain.invoke({"query": state["query"]})
         
-        # ✅ VALIDATION: Check all required fields are present
+        # ============= STEP 3: MERGE with pending email fields (if exists) =============
+        if pending_email:
+            print("   🔄 Found pending email action from previous message - merging fields...")
+            # Merge: current fields override pending fields (if provided)
+            merged_fields = {
+                "job_role": current_fields.job_role or pending_email.get("job_role"),
+                "company_name": current_fields.company_name or pending_email.get("company_name"),
+                "interview_datetime": current_fields.interview_datetime or pending_email.get("interview_datetime"),
+                "interview_location": current_fields.interview_location or pending_email.get("interview_location"),
+                "interviewer_name": current_fields.interviewer_name or pending_email.get("interviewer_name"),
+                "candidates": pending_email.get("candidates", [])  # Keep same candidates
+            }
+            details = InterviewDetails(**{k: v for k, v in merged_fields.items() if k != "candidates"})
+            candidates = merged_fields.get("candidates", [])
+            
+            # Show merged status
+            print(f"   ✅ Merged fields:")
+            if details.job_role:
+                print(f"      💼 Role: {details.job_role}")
+            if details.company_name:
+                print(f"      🏢 Company: {details.company_name}")
+            if details.interview_datetime:
+                print(f"      📅 DateTime: {details.interview_datetime}")
+            if details.interview_location:
+                print(f"      📍 Location: {details.interview_location}")
+            if details.interviewer_name:
+                print(f"      👤 Interviewer: {details.interviewer_name}")
+        else:
+            # New email action - get candidates from search results
+            details = current_fields
+            
+            query_analysis = state.get("query_analysis", {})
+            entities = query_analysis.get("entities", {})
+            mentioned_email = entities.get("email")
+            mentioned_name = entities.get("names", [None])[0] if entities.get("names") else None
+            
+            candidates = state.get("final_results", [])
+            
+            # Handle external emails or database candidates (same logic as before)
+            if mentioned_email and len(candidates) == 0:
+                candidates = [{
+                    "resume_id": "external_" + mentioned_email.replace("@", "_at_"),
+                    "candidate_name": mentioned_name or "Candidate",
+                    "email": mentioned_email,
+                    "skills": "",
+                    "total_experience_years": 0,
+                    "current_role": "External Candidate"
+                }]
+            elif mentioned_email and len(candidates) > 0:
+                matching_candidate = next((c for c in candidates if c.get("email") == mentioned_email), None)
+                if not matching_candidate:
+                    candidates = [{
+                        "resume_id": "external_" + mentioned_email.replace("@", "_at_"),
+                        "candidate_name": mentioned_name or "Candidate",
+                        "email": mentioned_email,
+                        "skills": "",
+                        "total_experience_years": 0,
+                        "current_role": "External Candidate"
+                    }]
+                else:
+                    candidates = [matching_candidate]
+            elif len(candidates) == 0:
+                state["answer"] = "❌ No candidate found. Please specify a candidate name or email address."
+                return state
+        
+        # ============= STEP 4: Validate all fields =============
         missing_fields = []
-        field_examples = {
-            "job_role": "e.g., 'Machine Learning Intern', 'Software Developer', 'Data Scientist'",
-            "company_name": "e.g., 'Google', 'Microsoft', 'ABC Corporation'",
-            "interview_datetime": "e.g., 'March 15, 2026 at 2:00 PM', 'Tomorrow at 10 AM', 'Next Monday 3 PM'",
-            "interview_location": "e.g., 'Building A Room 301', 'Online via Google Meet', 'Zoom link: https://...'",
-            "interviewer_name": "e.g., 'Dr. Sharma', 'John Smith', 'Sarah Johnson from HR'"
+        field_names = {
+            "job_role": "Job Role",
+            "company_name": "Company Name",
+            "interview_datetime": "Interview Date & Time",
+            "interview_location": "Interview Location",
+            "interviewer_name": "Interviewer Name"
         }
         
         if not details.job_role:
-            missing_fields.append(f"❌ **job_role** - {field_examples['job_role']}")
+            missing_fields.append("job_role")
         if not details.company_name:
-            missing_fields.append(f"❌ **company_name** - {field_examples['company_name']}")
+            missing_fields.append("company_name")
         if not details.interview_datetime:
-            missing_fields.append(f"❌ **interview_datetime** - {field_examples['interview_datetime']}")
+            missing_fields.append("interview_datetime")
         if not details.interview_location:
-            missing_fields.append(f"❌ **interview_location** - {field_examples['interview_location']}")
+            missing_fields.append("interview_location")
         if not details.interviewer_name:
-            missing_fields.append(f"❌ **interviewer_name** - {field_examples['interviewer_name']}")
+            missing_fields.append("interviewer_name")
         
-        # If any field is missing, return error and ask user to provide them
+        # ============= STEP 5: If fields missing, ASK for ALL of them =============
         if missing_fields:
-            error_message = "❌ **Cannot send interview invitations. Missing required information:**\n\n"
-            error_message += "\n".join(missing_fields)
-            error_message += "\n\n💡 **Please provide all the above details in your message and try again.**"
+            print(f"   ⚠️  {len(missing_fields)} field(s) still missing")
             
-            state["answer"] = error_message
-            print(f"   ⚠️  Missing fields detected. Asking user for complete information.")
+            # Save pending email action to conversation context
+            if "conversation_context" not in state:
+                state["conversation_context"] = {}
+            
+            state["conversation_context"]["pending_email_action"] = {
+                "job_role": details.job_role,
+                "company_name": details.company_name,
+                "interview_datetime": details.interview_datetime,
+                "interview_location": details.interview_location,
+                "interviewer_name": details.interviewer_name,
+                "candidates": candidates,
+                "missing_fields": missing_fields  # ✅ Store which fields are missing
+            }
+            
+            candidate_names = [c.get("candidate_name", "Unknown") for c in candidates]
+            
+            # Build message listing ALL missing fields
+            ask_message = f"📧 **Preparing to send interview invitation to {', '.join(candidate_names)}**\n\n"
+            ask_message += "Please provide the following details:\n\n"
+            
+            field_examples = {
+                "job_role": ("Job Role", "e.g., 'Machine Learning Intern', 'Software Developer'"),
+                "company_name": ("Company Name", "e.g., 'Google', 'Microsoft', 'ABC Corporation'"),
+                "interview_datetime": ("Interview Date & Time", "e.g., 'March 15 at 2 PM', 'Tomorrow at 10 AM'"),
+                "interview_location": ("Interview Location", "e.g., 'Conference Room A', 'Google Meet', 'Zoom'"),
+                "interviewer_name": ("Interviewer Name", "e.g., 'Dr. Sharma', 'John from HR'")
+            }
+            
+            for i, field_key in enumerate(missing_fields, 1):
+                name, example = field_examples[field_key]
+                ask_message += f"{i}. **{name}:** ({example})\n"
+            
+            state["answer"] = ask_message
+            print(f"   💬 Asking user for {len(missing_fields)} missing field(s)")
             return state
         
-        # All fields present - proceed with sending emails
-        print(f"   ✅ All required fields present!")
+        # ============= STEP 6: All fields complete - SEND EMAIL =============
+        print(f"   ✅ All 5 fields complete! Sending emails...")
         print(f"   💼 Role: {details.job_role}")
         print(f"   🏢 Company: {details.company_name}")
         print(f"   📅 Date/Time: {details.interview_datetime}")
         print(f"   📍 Location: {details.interview_location}")
         print(f"   👤 Interviewer: {details.interviewer_name}")
         
-        # Send email to each candidate
+        # Clear pending email action (email being sent now)
+        if "pending_email_action" in state.get("conversation_context", {}):
+            del state["conversation_context"]["pending_email_action"]
+        
+        # Send emails (same logic as before)
         results = []
         for idx, candidate in enumerate(candidates, 1):
             resume_id = candidate.get("resume_id")
             candidate_name = candidate.get("candidate_name", "Unknown")
             candidate_email = candidate.get("email")
             
-            # Check if candidate has email
             if not candidate_email or candidate_email == "Not available":
-                print(f"   ❌ Skipping {candidate_name}: No email found")
-                results.append({
-                    "candidate": candidate_name,
-                    "status": "skipped",
-                    "reason": "No email address"
-                })
+                results.append({"candidate": candidate_name, "status": "skipped", "reason": "No email address"})
                 continue
             
-            print(f"\n   📤 [{idx}/{num_candidates}] Sending to {candidate_name} ({candidate_email})...")
+            print(f"\n   📤 [{idx}/{len(candidates)}] Sending to {candidate_name} ({candidate_email})...")
             
-            # Call MCP server - check if event loop is running
             try:
                 loop = asyncio.get_running_loop()
-                # We're in an async context, need to create a new thread
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(
@@ -1609,7 +1645,6 @@ Return null for any field not explicitly mentioned in the query."""),
                     )
                     result = future.result()
             except RuntimeError:
-                # No event loop running, safe to use asyncio.run
                 result = asyncio.run(call_mcp_email_server(
                     resume_id=resume_id,
                     job_role=details.job_role,
@@ -1620,28 +1655,21 @@ Return null for any field not explicitly mentioned in the query."""),
                 ))
             
             if result.get("status") == "sent":
-                email_to = result.get("to", candidate_email)
-                print(f"      ✅ Sent to {email_to}")
                 results.append({
                     "candidate": candidate_name,
-                    "email": email_to,
-                    "status": "sent",
-                    "subject": result.get("subject", "")
+                    "email": result.get("to", candidate_email),
+                    "status": "sent"
                 })
             else:
-                error_msg = result.get("message", "Unknown error")
-                print(f"      ❌ Failed: {error_msg}")
                 results.append({
                     "candidate": candidate_name,
                     "email": candidate_email,
                     "status": "failed",
-                    "reason": error_msg
+                    "reason": result.get("message", "Unknown error")
                 })
         
-        # Generate summary answer
+        # Generate success message
         sent_count = sum(1 for r in results if r["status"] == "sent")
-        failed_count = sum(1 for r in results if r["status"] == "failed")
-        skipped_count = sum(1 for r in results if r["status"] == "skipped")
         
         if sent_count > 0:
             state["email_sent"] = True
@@ -1651,30 +1679,17 @@ Return null for any field not explicitly mentioned in the query."""),
             answer_parts.append(f"- Company: {details.company_name}")
             answer_parts.append(f"- Interview: {details.interview_datetime}")
             answer_parts.append(f"- Location: {details.interview_location}\n")
-            
             answer_parts.append(f"**Sent to:**")
             for r in results:
                 if r["status"] == "sent":
                     answer_parts.append(f"  ✅ {r['candidate']} ({r['email']})")
             
-            if failed_count > 0:
-                answer_parts.append(f"\n**Failed ({failed_count}):**")
-                for r in results:
-                    if r["status"] == "failed":
-                        answer_parts.append(f"  ❌ {r['candidate']}: {r['reason']}")
-            
-            if skipped_count > 0:
-                answer_parts.append(f"\n**Skipped ({skipped_count}):**")
-                for r in results:
-                    if r["status"] == "skipped":
-                        answer_parts.append(f"  ⚠️  {r['candidate']}: {r['reason']}")
-            
             state["answer"] = "\n".join(answer_parts)
         else:
-            state["answer"] = f"❌ Failed to send emails. {failed_count} failed, {skipped_count} skipped (no email)."
+            state["answer"] = "❌ Failed to send emails."
             
     except Exception as e:
-        state["answer"] = f"❌ Error sending email: {str(e)}"
+        state["answer"] = f"❌ Error: {str(e)}"
         print(f"   ❌ Error: {str(e)}")
     
     return state
@@ -1799,7 +1814,7 @@ def generate_answer_node(state: AgentState) -> AgentState:
         results_to_use = state["final_results"]
         format_as_list = True
     
-        # 2. If wants detailed info (education/experience/etc) → detailed profiles
+    # 2. If wants detailed info (education/experience/etc) → detailed profiles
     elif wants_detailed:
         # ✅ FIXED: If user wants ALL previous ("their", "these"), show ALL, don't limit to 5
         wants_all_from_previous = any(phrase in query_lower for phrase in [
@@ -1916,7 +1931,7 @@ def should_retry_node(state: AgentState) -> Literal["retry", "end"]:
         state["use_llm_sql"] = True  # Enable LLM SQL on retry
 
         # Switch strategy to vector_first if SQL failed
-        if state["search_strategy"] in ["sql_first", "sql_only"]:
+        if state["search_strategy"] == "sql_only":
             state["search_strategy"] = "vector_first"
         else:
             state["search_strategy"] = "hybrid"
@@ -2025,7 +2040,8 @@ class ResumeIntelligenceAgent:
         self.graph = create_intelligent_agent()
 
     def query(
-        self, user_query: str, session_id: str = None, verbose: bool = True
+        self, user_query: str, session_id: str = None, verbose: bool = True,
+        conversation_context: dict = None
     ) -> dict:
         """
         Process a query and return natural language answer
@@ -2097,7 +2113,7 @@ class ResumeIntelligenceAgent:
             "llm_generated_sql": "",
             "aggregation_result": 0,
             "chat_history": chat_history,  # ✅ Load from database
-            "conversation_context": {},  # ✅ Will be populated from chat history
+            "conversation_context": conversation_context or {},  # ✅ Persist across turns
         }
 
         # Run the graph
@@ -2136,6 +2152,7 @@ class ResumeIntelligenceAgent:
             "answer": answer,
             "session_id": session_id,
             "candidate_ids": candidate_ids,
+            "conversation_context": final_state.get("conversation_context", {}),
         }
 
 

@@ -75,6 +75,9 @@ if "messages" not in st.session_state:
 if "candidate_results" not in st.session_state:
     st.session_state.candidate_results = []
 
+if "conversation_context" not in st.session_state:
+    st.session_state.conversation_context = {}
+
 if "api_keys_set" not in st.session_state:
     st.session_state.api_keys_set = False
 
@@ -89,15 +92,22 @@ with st.sidebar:
     with st.expander("⚙️ Configure API Keys", expanded=not st.session_state.api_keys_set):
         st.info("💡 **Tip**: If changing keys, use the 'Force Reload' button below for best results")
         
+        openai_api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=os.getenv("OPENAI_API_KEY", ""),
+            help="Required for LangGraph agent and MCP email generation"
+        )
+        
         groq_api_key = st.text_input(
-            "Groq API Key",
+            "Groq API Key (Optional)",
             type="password",
             value=os.getenv("GROQ_API_KEY", ""),
             help="Get your free API key from https://console.groq.com"
         )
         
         gemini_api_key = st.text_input(
-            "Gemini API Key (Fallback)",
+            "Gemini API Key (Optional)",
             type="password",
             value=os.getenv("GEMINI_API_KEY", ""),
             help="Get your free API key from https://aistudio.google.com/app/apikey"
@@ -107,9 +117,11 @@ with st.sidebar:
         
         with col1:
             if st.button("💾 Save & Initialize", use_container_width=True):
-                if groq_api_key.strip():
+                if openai_api_key.strip():
                     # Set environment variables
-                    os.environ["GROQ_API_KEY"] = groq_api_key.strip()
+                    os.environ["OPENAI_API_KEY"] = openai_api_key.strip()
+                    if groq_api_key.strip():
+                        os.environ["GROQ_API_KEY"] = groq_api_key.strip()
                     if gemini_api_key.strip():
                         os.environ["GEMINI_API_KEY"] = gemini_api_key.strip()
                     
@@ -139,17 +151,19 @@ with st.sidebar:
                     except Exception as e:
                         st.error(f"❌ Failed to initialize agent: {str(e)}")
                 else:
-                    st.warning("⚠️ Please provide at least the Groq API key")
+                    st.warning("⚠️ Please provide at least the OpenAI API key")
         
         with col2:
             if st.button("🔄 Force Reload", use_container_width=True, type="secondary"):
-                if groq_api_key.strip():
+                if openai_api_key.strip():
                     # Nuclear option: clear everything
                     st.cache_data.clear()
                     st.cache_resource.clear()
                     
                     # Update environment
-                    os.environ["GROQ_API_KEY"] = groq_api_key.strip()
+                    os.environ["OPENAI_API_KEY"] = openai_api_key.strip()
+                    if groq_api_key.strip():
+                        os.environ["GROQ_API_KEY"] = groq_api_key.strip()
                     if gemini_api_key.strip():
                         os.environ["GEMINI_API_KEY"] = gemini_api_key.strip()
                     
@@ -175,6 +189,7 @@ with st.sidebar:
             st.session_state.session_id = None
             st.session_state.messages = []
             st.session_state.candidate_results = []
+            st.session_state.conversation_context = {}
             st.rerun()
         
         st.markdown("---")
@@ -198,6 +213,7 @@ with st.sidebar:
                         # Load messages from database
                         st.session_state.messages = load_chat_history(session_id, limit=50)
                         st.session_state.candidate_results = []
+                        st.session_state.conversation_context = {}
                         st.rerun()
             else:
                 st.info("No previous chats")
@@ -234,20 +250,31 @@ if not st.session_state.api_keys_set:
     st.info("""
     ### Getting Started:
     
-    1. **Groq API Key** (Required):
+    1. **OpenAI API Key** (Required):
+       - Visit [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+       - Sign up and create an API key
+       - Paste it in the sidebar (needed for LangGraph agent and MCP email generation)
+    
+    2. **Groq API Key** (Optional - Fast inference):
        - Visit [https://console.groq.com](https://console.groq.com)
        - Sign up for a free account
        - Create an API key
        - Paste it in the sidebar
     
-    2. **Gemini API Key** (Optional - Fallback):
+    3. **Gemini API Key** (Optional - Fallback):
        - Visit [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
        - Create a free API key
        - Paste it in the sidebar
     
-    3. Click **"Save & Initialize Agent"**
+    4. Click **"Save & Initialize Agent"**
     
-    4. Start chatting!
+    5. Start chatting!
+    
+    ### Features:
+    - 🔍 **Smart Search**: Find candidates by skills, experience, education, location
+    - 📧 **Email Integration**: Send interview invites via MCP servers
+    - 💬 **Context-Aware**: Ask follow-up questions about candidates
+    - 🎯 **Hybrid Search**: Combines SQL filtering and semantic vector search
     """)
     st.stop()
 
@@ -274,6 +301,87 @@ with chat_container:
                 candidate_count = len(message["candidate_ids"])
                 if candidate_count > 0:
                     st.caption(f"👥 Found {candidate_count} candidate(s)")
+
+# ✅ Show email field collection form if pending
+if st.session_state.conversation_context.get("pending_email_action"):
+    pending = st.session_state.conversation_context["pending_email_action"]
+    missing = pending.get("missing_fields", [])
+    
+    field_labels = {
+        "job_role": "Job Role",
+        "company_name": "Company Name",
+        "interview_datetime": "Interview Date & Time",
+        "interview_location": "Interview Location",
+        "interviewer_name": "Interviewer Name"
+    }
+    field_placeholders = {
+        "job_role": "e.g., Machine Learning Intern, Software Developer",
+        "company_name": "e.g., Google, Microsoft",
+        "interview_datetime": "e.g., March 15 at 2 PM",
+        "interview_location": "e.g., Google Meet, Conference Room A",
+        "interviewer_name": "e.g., Dr. Sharma, John from HR"
+    }
+    
+    if missing:
+        with st.form("email_fields_form"):
+            st.markdown("📝 **Fill in the details below:**")
+            field_values = {}
+            for field_key in missing:
+                field_values[field_key] = st.text_input(
+                    field_labels.get(field_key, field_key),
+                    placeholder=field_placeholders.get(field_key, ""),
+                    key=f"email_field_{field_key}"
+                )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                submitted = st.form_submit_button("📧 Send Email", use_container_width=True, type="primary")
+            with col2:
+                cancelled = st.form_submit_button("❌ Cancel", use_container_width=True)
+            
+            if submitted:
+                # Check all fields filled
+                empty_fields = [k for k, v in field_values.items() if not v.strip()]
+                if empty_fields:
+                    st.error(f"Please fill in: {', '.join(field_labels[f] for f in empty_fields)}")
+                else:
+                    # Build query with all fields and send to agent
+                    parts = [f"{field_labels[k]}: {v.strip()}" for k, v in field_values.items()]
+                    combined_query = ", ".join(parts)
+                    
+                    # Add as user message
+                    st.session_state.messages.append({"role": "user", "content": combined_query})
+                    
+                    with st.spinner("📧 Sending interview invitation..."):
+                        try:
+                            result = st.session_state.agent.query(
+                                user_query=combined_query,
+                                session_id=st.session_state.session_id,
+                                verbose=False,
+                                conversation_context=st.session_state.conversation_context
+                            )
+                            st.session_state.session_id = result["session_id"]
+                            st.session_state.candidate_results = result.get("candidate_ids", [])
+                            st.session_state.conversation_context = result.get("conversation_context", {})
+                            st.session_state.messages.append({
+                                "role": "agent",
+                                "content": result["answer"],
+                                "candidate_ids": result.get("candidate_ids", [])
+                            })
+                        except Exception as e:
+                            st.session_state.messages.append({
+                                "role": "agent",
+                                "content": f"❌ Error: {str(e)}"
+                            })
+                    st.rerun()
+            
+            if cancelled:
+                st.session_state.conversation_context = {}
+                st.session_state.messages.append({
+                    "role": "agent",
+                    "content": "❌ Email sending cancelled."
+                })
+                st.rerun()
 
 # Chat input
 user_input = st.chat_input("Ask me about candidates... (e.g., 'Find Python developers with 5+ years experience')")
@@ -339,12 +447,20 @@ What would you like to know?"""
     
     # Get agent response
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Searching resumes..."):
+        # Check if this is an email sending action or email field continuation
+        is_email_action = any(keyword in user_input.lower() for keyword in [
+            "send interview", "send email", "send invite", "email interview"
+        ]) or st.session_state.conversation_context.get("pending_email_action")
+        
+        spinner_text = "📧 Processing email details..." if is_email_action else "🔍 Searching resumes..."
+        
+        with st.spinner(spinner_text):
             try:
                 result = st.session_state.agent.query(
                     user_query=user_input,
                     session_id=st.session_state.session_id,
-                    verbose=False  # Disable console output
+                    verbose=False,  # Disable console output
+                    conversation_context=st.session_state.conversation_context
                 )
                 
                 # Update session ID
@@ -353,8 +469,9 @@ What would you like to know?"""
                 # Display answer
                 st.markdown(result["answer"])
                 
-                # Store candidate results
+                # Store candidate results and conversation context
                 st.session_state.candidate_results = result.get("candidate_ids", [])
+                st.session_state.conversation_context = result.get("conversation_context", {})
                 
                 # Add to messages
                 st.session_state.messages.append({
@@ -363,14 +480,18 @@ What would you like to know?"""
                     "candidate_ids": result.get("candidate_ids", [])
                 })
                 
-                # Show candidate count
-                if result.get("candidate_ids"):
+                # Show candidate count or email status
+                if result.get("email_sent"):
+                    st.success("✅ Email(s) sent successfully!")
+                elif result.get("candidate_ids"):
                     st.caption(f"👥 Found {len(result['candidate_ids'])} candidate(s)")
                 
             except Exception as e:
                 error_msg = str(e)
                 if "GROQ_API_KEY" in error_msg or "api" in error_msg.lower():
                     st.error("❌ API Key Error. Please check your API keys in the sidebar.")
+                elif "MCP" in error_msg or "mcp" in error_msg.lower():
+                    st.error("❌ MCP Server Error. Make sure MCP dependencies are installed: pip install mcp fastmcp")
                 else:
                     st.error(f"❌ Error: {error_msg}")
                 
@@ -419,7 +540,7 @@ if st.session_state.candidate_results:
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: #999; font-size: 0.8rem;'>"
-    "Resume Intelligence System v2.0 | Powered by LangGraph + ChromaDB + Groq/Gemini"
+    "Resume Intelligence System v2.5 | Powered by LangGraph + ChromaDB + OpenAI + MCP Servers"
     "</div>",
     unsafe_allow_html=True
 )
