@@ -465,7 +465,7 @@ executor.execute("MCP/interview_invite_sender.py", "send_interview_invite", {...
 ### 4.4 `interview_invite_sender.py` — Server-Side Validation
 
 **File:** `MCP/interview_invite_sender.py`
-
+**s**
 The most important architectural decision: **validation lives in the server**, not the agent.
 
 ```python
