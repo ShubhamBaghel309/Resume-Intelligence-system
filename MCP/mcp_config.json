@@ -1,0 +1,51 @@
+{
+  "servers": {
+    "interview_email": {
+      "name": "Interview Email Sender",
+      "script": "MCP/interview_invite_sender.py",
+      "description": "Send personalized interview invitation emails to candidates",
+      "trigger_keywords": [
+        "send interview", "send email", "send invite", "email interview",
+        "invite to interview", "schedule interview", "send invitation"
+      ],
+      "needs_candidate_search": true,
+      "auto_fields": ["resume_id"]
+    },
+
+    "calculator": {
+      "name": "Calculator",
+      "script": "MCP/calculatorMCPserver.py",
+      "description": "Perform basic arithmetic: add, subtract, multiply, divide",
+      "trigger_keywords": [
+        "calculate", "add", "subtract", "multiply", "divide",
+        "what is", "sum of", "product of", "difference of"
+      ],
+      "needs_candidate_search": false,
+      "auto_fields": []
+    },
+
+    "github_profile": {
+      "name": "GitHub Profile Checker",
+      "script": "MCP/github_profile_server.py",
+      "description": "Fetch a candidate's public GitHub profile, repos, and languages via GitHub API",
+      "trigger_keywords": [
+        "github profile", "check github", "github repos",
+        "github account", "github of", "github user"
+      ],
+      "needs_candidate_search": false,
+      "auto_fields": []
+    },
+
+    "jd_generator": {
+      "name": "Job Description Generator",
+      "script": "MCP/jd_generator_server.py",
+      "description": "Generate professional job descriptions using AI",
+      "trigger_keywords": [
+        "generate jd", "job description", "create jd", "write jd",
+        "generate job description", "draft job posting", "create job posting"
+      ],
+      "needs_candidate_search": false,
+      "auto_fields": []
+    }
+  }
+}
