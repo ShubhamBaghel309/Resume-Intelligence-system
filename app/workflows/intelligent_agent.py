@@ -8,15 +8,10 @@ from pydantic import BaseModel, Field
 import os
 import asyncio
 import shutil
+import json
 
-# MCP imports for email sending
-try:
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
-    import json
-    MCP_AVAILABLE = True
-except ImportError:
-    MCP_AVAILABLE = False
+# MCP communication is now handled by app/mcp_infra/executor.py
+# Add new MCP servers in MCP/mcp_config.json - no changes needed here
 
 # Import existing components
 import sys
@@ -48,8 +43,8 @@ class AgentState(TypedDict):
     aggregation_result: float  # Result from aggregation queries (COUNT, AVG, etc.)
     chat_history: list[dict[str, any]]
     conversation_context: dict  # Candidates from previous conversation (for Q&A queries)
-    is_email_action: bool  # Whether this query is requesting to send an email
-    email_sent: bool  # Whether email was successfully sent
+    tool_action: dict   # Populated by MCPRegistry when query matches a registered MCP server
+    tool_executed: bool  # Whether the MCP tool was successfully executed
 
 
 # ============= Query Analysis Models =============
@@ -428,6 +423,22 @@ def analyze_query_node(state: AgentState) -> AgentState:
     """
 
     # ============= BUILD CHAT CONTEXT =============
+    if state["query"]=="Hi" or state["query"]=="Hello" or state["query"]=="Hey" :
+        state["query_analysis"] = {
+            "query_type": "greeting",
+            "intent": "greet the agent",
+            "entities": {},
+            "filters": {},
+            "search_strategy": None,
+            "confidence": 1.0,
+            "reasoning": "User is greeting, no search needed",
+            "is_refinement": False,
+            "use_llm_sql": False,
+            "sql_complexity_reason": "",
+            "is_aggregation_query": False,
+            "is_qa_query": False
+        }
+        return state
     chat_context = ""
     previous_candidate_ids = []
     most_recent_candidates = []  # ✅ Track MOST RECENT with names AND IDs
@@ -496,10 +507,10 @@ def analyze_query_node(state: AgentState) -> AgentState:
     
     # ✅ ALWAYS save conversation context to state for later use
     if most_recent_candidates:
-        state["conversation_context"] = {
-            "candidate_ids": [c["id"] for c in most_recent_candidates],
-            "candidate_names": [c["name"] for c in most_recent_candidates]
-        }
+        existing_ctx = state.get("conversation_context", {})
+        existing_ctx["candidate_ids"] = [c["id"] for c in most_recent_candidates]
+        existing_ctx["candidate_names"] = [c["name"] for c in most_recent_candidates]
+        state["conversation_context"] = existing_ctx
     
     # ============= QUERY ANALYSIS PROMPT =============
     analysis_prompt = ChatPromptTemplate.from_messages(
@@ -675,16 +686,36 @@ These queries use data from PREVIOUS conversation context - NO database search n
         state["sql_filters"] = analysis.filters.model_dump()
         state["use_llm_sql"] = analysis.use_llm_sql  # Set flag from analysis
         
-        # Detect email sending action
-        state["is_email_action"] = (analysis.query_type == "email_action")
-        
-        # ✅ CRITICAL: If there's a pending email action, treat current query as email action continuation
-        conversation_context = state.get("conversation_context", {})
-        if conversation_context.get("pending_email_action"):
-            state["is_email_action"] = True
-            print(f"   📧 Detected pending email action - treating current query as field completion")
-        
-        state["email_sent"] = False
+        # ── MCP Tool Action Detection (config-driven via MCPRegistry) ──────────────
+        state["tool_action"] = {}
+        state["tool_executed"] = False
+
+        try:
+            from mcp_infra.registry import MCPRegistry
+            registry = MCPRegistry()
+
+            # 1. Config-based keyword matching (primary)
+            matched_server = registry.match_intent(state["query"])
+
+            # 2. LLM fallback for backward compat (e.g., query_type == "email_action")
+            if not matched_server and analysis.query_type == "email_action":
+                matched_server = "interview_email"
+
+            # 3. Continuation: pending tool action from previous turn
+            conversation_context = state.get("conversation_context", {})
+            if not matched_server and conversation_context.get("pending_tool_action"):
+                matched_server = conversation_context["pending_tool_action"]["server_id"]
+                print(f"   🔧 Continuing pending tool action: {matched_server}")
+
+            if matched_server:
+                server_cfg = registry.get_server_config(matched_server)
+                state["tool_action"] = {
+                    "server_id": matched_server,
+                    "needs_candidate_search": server_cfg.get("needs_candidate_search", False)
+                }
+                print(f"   🔧 Tool action: {server_cfg.get('name', matched_server)}")
+        except Exception as _reg_err:
+            print(f"   ⚠️  MCPRegistry error: {_reg_err}")
 
         print(f"\n🧠 QUERY ANALYSIS:")
         print(f"   Type: {analysis.query_type}")
@@ -854,7 +885,8 @@ def sql_filter_node(state: AgentState) -> AgentState:
         params.append(filters["max_experience"])
 
     # Location filter
-    if filters.get("location"):
+    # Skip if tool action with explicit names (location may refer to interview venue, not candidate)
+    if filters.get("location") and not should_skip_job_filters:
         where_clauses.append("location LIKE ?")
         params.append(f"%{filters['location']}%")
 
@@ -948,13 +980,14 @@ def sql_filter_node(state: AgentState) -> AgentState:
                 if len(skill_groups) > 1:
                     print(f"   🔍 Normal mode: Matching ANY of {len(skill_groups)} skills (OR logic)")
 
-    # ✅ CRITICAL FIX: For email_action queries with explicit names,
-    # do NOT apply job_title/company filters - those are for EMAIL CONTENT, not candidate search
-    is_email_action = state.get("is_email_action", False)
-    should_skip_job_filters = is_email_action and has_explicit_names
-    
+    # ✅ For tool actions that need candidate search (e.g., email), skip job/company filters
+    # Those filters would narrow candidates unintentionally - they're for tool CONTENT, not search
+    tool_action = state.get("tool_action", {})
+    is_tool_action_with_search = bool(tool_action) and tool_action.get("needs_candidate_search", False)
+    should_skip_job_filters = is_tool_action_with_search and has_explicit_names
+
     if should_skip_job_filters:
-        print(f"   📧 Email action with explicit names: Ignoring job/company filters (used for email content only)")
+        print(f"   🔧 Tool action with explicit names: Ignoring job/company filters (used for tool content only)")
 
     # Job title filter (searches in work_experience JSON and current_role)
     # Skip if email action with explicit names
@@ -1088,25 +1121,26 @@ def llm_sql_generation_node(state: AgentState) -> AgentState:
     # Check if this is an aggregation query
     analysis = state.get("query_analysis", {})
     is_aggregation = analysis.get("is_aggregation_query", False)
-    is_email_action = state.get("is_email_action", False)
-    
-    # Check if query has explicit names (for email actions)
+    tool_action = state.get("tool_action", {})
+    is_tool_action_with_search = bool(tool_action) and tool_action.get("needs_candidate_search", False)
+
+    # Check if query has explicit names (for tool actions like email)
     entities = analysis.get("entities", {})
     has_explicit_names = bool(entities.get("names"))
-    
+
     if is_aggregation:
         select_instruction = "2. For aggregation queries (how many, count, average), use COUNT(*), AVG(), SUM(), MAX(), MIN() - NOT resume_id"
     else:
         select_instruction = "2. Always SELECT resume_id for candidate search queries"
-    
-    # Add special instruction for email actions
+
+    # Add special instruction for tool actions with candidate search
     email_action_note = ""
-    if is_email_action and has_explicit_names:
+    if is_tool_action_with_search and has_explicit_names:
         email_action_note = f"""
-⚠️ CRITICAL: This is an EMAIL ACTION query with explicit candidate names.
+⚠️ CRITICAL: This is a TOOL ACTION query with explicit candidate names.
 - Names mentioned: {', '.join(entities.get('names', []))}
 - ONLY filter by candidate names using OR logic: (candidate_name LIKE '%Name1%' OR candidate_name LIKE '%Name2%')
-- IGNORE any job titles, companies, or skills mentioned - those are for EMAIL CONTENT, not filtering
+- IGNORE any job titles, companies, or skills mentioned - those are for TOOL CONTENT, not candidate filtering
 - Example: "Send email to John and Mary for ML Intern at Google" → Only filter by John OR Mary (ignore "ML Intern" and "Google")
 """
     
@@ -1427,325 +1461,298 @@ def fetch_context_candidates_node(state: AgentState) -> AgentState:
     return state
 
 
-def send_email_via_mcp_node(state: AgentState) -> AgentState:
+# ============= Helper functions for execute_mcp_tool_node =============
+
+def _extract_tool_fields(query: str, field_names: list, candidate_names: list = None) -> dict:
     """
-    Node: Send interview invite email via MCP server with conversational field collection
-    
-    NEW BEHAVIOR:
-    - If fields are missing in first request, asks user for them
-    - User provides missing fields in follow-up message
-    - Agent automatically extracts and merges fields
-    - Sends email once all 5 fields are complete
+    Generic LLM-based field extraction. Works for any server's required_fields.
+    Returns {field_name: value_or_None} for each field in field_names.
+    Falls back to simple "Key: Value" regex parsing if LLM fails.
+    candidate_names: names to EXCLUDE from extraction (they are candidates, not field values).
     """
-    
-    if not MCP_AVAILABLE:
-        state["answer"] = "❌ MCP library not installed. Email sending is not available. Run: pip install mcp"
-        return state
-    
-    print("\n📧 PROCESSING EMAIL ACTION...")
-    
-    # ============= STEP 1: Check for pending email action from previous conversation =============
-    conversation_context = state.get("conversation_context", {})
-    pending_email = conversation_context.get("pending_email_action")
-    
-    # ============= STEP 2: Extract fields from CURRENT query =============
+    if not field_names:
+        return {}
+
+    # --- Attempt 1: simple regex for "Key: Value" patterns (fast, no LLM) ---
+    import re
+    regex_result = {}
+    for f in field_names:
+        # Match "Job Role: xyz" or "job_role: xyz" patterns
+        label_variants = [
+            f.replace("_", " "),                      # job_role -> job role
+            f.replace("_", " ").title(),               # job_role -> Job Role
+            f,                                         # job_role
+        ]
+        for label in label_variants:
+            pattern = rf"(?i){re.escape(label)}\s*:\s*(.+?)(?:,\s*(?:\w[\w ]*:)|$)"
+            m = re.search(pattern, query)
+            if m:
+                regex_result[f] = m.group(1).strip()
+                break
+
+    # If regex found all fields, skip LLM entirely
+    if all(regex_result.get(f) for f in field_names):
+        print("   ✅ All fields extracted via regex (fast path)")
+        return regex_result
+
+    # --- Attempt 2: LLM extraction ---
+    fields_list = "\n".join(f"- {f}" for f in field_names)
+
+    # Build candidate-awareness context so LLM doesn't confuse candidate names with field values
+    candidate_note = ""
+    if candidate_names:
+        names_str = ", ".join(candidate_names)
+        candidate_note = (f"\n\nIMPORTANT: The following are CANDIDATE names (the person receiving the action), "
+                         f"NOT field values. Do NOT assign them to any field: {names_str}")
+
     extraction_prompt = ChatPromptTemplate.from_messages([
-        ("system", """Extract interview details from the query. 
-        
-IMPORTANT: Only extract information that is EXPLICITLY mentioned. 
-If a field is not specified, return null/None.
-
-Fields to extract:
-- job_role: The position being hired for (e.g., "Machine Learning Intern", "Software Developer")
-- company_name: The company conducting the interview (e.g., "Google", "Microsoft", "ABC Corp")
-- interview_datetime: The date and time of interview (e.g., "March 15, 2026 at 2:00 PM", "Tomorrow at 10 AM")
-- interview_location: Where the interview will be held (e.g., "Building A Room 301", "Zoom link: https://...", "Google Meet")
-- interviewer_name: Person conducting the interview (e.g., "Dr. Sharma", "John Smith", "HR Team")
-
-Return null for any field not explicitly mentioned in the query."""),
-        ("user", "Query: {query}\n\nExtract: job_role, company_name, interview_datetime, interview_location, interviewer_name")
+        ("system", "Extract the following fields from the user query.\n"
+                   "Return ONLY values that are EXPLICITLY mentioned as field values. "
+                   "Return null for anything not clearly provided.\n\n"
+                   f"Fields to extract:\n{fields_list}"
+                   f"{candidate_note}\n\n"
+                   "Return valid JSON with those exact keys."),
+        ("user", "Query: {query}")
     ])
-    
-    class InterviewDetails(BaseModel):
-        job_role: str | None = Field(default=None)
-        company_name: str | None = Field(default=None)
-        interview_datetime: str | None = Field(default=None)
-        interview_location: str | None = Field(default=None)
-        interviewer_name: str | None = Field(default=None)
-    
+
+    chain = extraction_prompt | llm | JsonOutputParser()
     try:
-        details_chain = extraction_prompt | llm.with_structured_output(InterviewDetails)
-        current_fields = details_chain.invoke({"query": state["query"]})
-        
-        # ============= STEP 3: MERGE with pending email fields (if exists) =============
-        if pending_email:
-            print("   🔄 Found pending email action from previous message - merging fields...")
-            # Merge: current fields override pending fields (if provided)
-            merged_fields = {
-                "job_role": current_fields.job_role or pending_email.get("job_role"),
-                "company_name": current_fields.company_name or pending_email.get("company_name"),
-                "interview_datetime": current_fields.interview_datetime or pending_email.get("interview_datetime"),
-                "interview_location": current_fields.interview_location or pending_email.get("interview_location"),
-                "interviewer_name": current_fields.interviewer_name or pending_email.get("interviewer_name"),
-                "candidates": pending_email.get("candidates", [])  # Keep same candidates
-            }
-            details = InterviewDetails(**{k: v for k, v in merged_fields.items() if k != "candidates"})
-            candidates = merged_fields.get("candidates", [])
-            
-            # Show merged status
-            print(f"   ✅ Merged fields:")
-            if details.job_role:
-                print(f"      💼 Role: {details.job_role}")
-            if details.company_name:
-                print(f"      🏢 Company: {details.company_name}")
-            if details.interview_datetime:
-                print(f"      📅 DateTime: {details.interview_datetime}")
-            if details.interview_location:
-                print(f"      📍 Location: {details.interview_location}")
-            if details.interviewer_name:
-                print(f"      👤 Interviewer: {details.interviewer_name}")
-        else:
-            # New email action - get candidates from search results
-            details = current_fields
-            
-            query_analysis = state.get("query_analysis", {})
-            entities = query_analysis.get("entities", {})
-            mentioned_email = entities.get("email")
-            mentioned_name = entities.get("names", [None])[0] if entities.get("names") else None
-            
-            candidates = state.get("final_results", [])
-            
-            # Handle external emails or database candidates (same logic as before)
-            if mentioned_email and len(candidates) == 0:
-                candidates = [{
-                    "resume_id": "external_" + mentioned_email.replace("@", "_at_"),
-                    "candidate_name": mentioned_name or "Candidate",
-                    "email": mentioned_email,
-                    "skills": "",
-                    "total_experience_years": 0,
-                    "current_role": "External Candidate"
-                }]
-            elif mentioned_email and len(candidates) > 0:
-                matching_candidate = next((c for c in candidates if c.get("email") == mentioned_email), None)
-                if not matching_candidate:
-                    candidates = [{
-                        "resume_id": "external_" + mentioned_email.replace("@", "_at_"),
-                        "candidate_name": mentioned_name or "Candidate",
-                        "email": mentioned_email,
-                        "skills": "",
-                        "total_experience_years": 0,
-                        "current_role": "External Candidate"
-                    }]
-                else:
-                    candidates = [matching_candidate]
-            elif len(candidates) == 0:
-                state["answer"] = "❌ No candidate found. Please specify a candidate name or email address."
-                return state
-        
-        # ============= STEP 4: Validate all fields =============
-        missing_fields = []
-        field_names = {
-            "job_role": "Job Role",
-            "company_name": "Company Name",
-            "interview_datetime": "Interview Date & Time",
-            "interview_location": "Interview Location",
-            "interviewer_name": "Interviewer Name"
+        result = chain.invoke({"query": query})
+        llm_result = {f: result.get(f) for f in field_names}
+    except Exception as e:
+        print(f"   ⚠️  Field extraction failed: {e}")
+        llm_result = {f: None for f in field_names}
+
+    # Merge: prefer regex (exact) over LLM, fill gaps from LLM
+    merged = {}
+    for f in field_names:
+        merged[f] = regex_result.get(f) or llm_result.get(f)
+    return merged
+
+
+def _build_ask_message(candidate_names: list, missing_fields: list, field_examples: dict) -> str:
+    """Build the message listing ALL missing fields for the user to fill in."""
+    if candidate_names:
+        msg = f"📧 **Preparing to send invitation to {', '.join(candidate_names)}**\n\n"
+    else:
+        msg = "📋 **Please provide the following details:**\n\n"
+    msg += "Please provide the following details:\n\n"
+    for i, fk in enumerate(missing_fields, 1):
+        meta = field_examples.get(fk, {})
+        label = meta.get("label", fk.replace("_", " ").title())
+        example = meta.get("example", "")
+        msg += f"{i}. **{label}:** ({example})\n"
+    return msg
+
+
+def _format_success_message(sent: list, failed: list, fields: dict, server_config: dict) -> str:
+    """Format a user-facing success message after MCP tool execution."""
+    server_name = server_config.get("name", "Tool")
+    parts = [f"✅ **{server_name} - {len(sent)} successful!**\n"]
+    non_null = {k: v for k, v in fields.items() if v}
+    if non_null:
+        parts.append("📋 **Details:**")
+        for k, v in non_null.items():
+            parts.append(f"- {k.replace('_', ' ').title()}: {v}")
+        parts.append("")
+    parts.append("**Results:**")
+    for r in sent:
+        icon = "✅" if r.get("status") == "sent" else "📄"
+        parts.append(f"  {icon} {r.get('candidate', '')} ({r.get('to', '')}) - {r.get('message', '')}")
+    if failed:
+        parts.append("\n**Failed:**")
+        for r in failed:
+            parts.append(f"  ❌ {r.get('candidate', '')} - {r.get('message', 'Unknown error')}")
+    return "\n".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────
+# Generic MCP Tool Node  (replaces send_email_via_mcp_node)
+# ─────────────────────────────────────────────────────────────
+
+def execute_mcp_tool_node(state: AgentState) -> AgentState:
+    """
+    Universal MCP Tool Executor Node.
+
+    Schema-driven: discovers tool name, required fields, and field metadata
+    from the live server via tools/list — like Claude Desktop does.
+    Config (mcp_config.json) only provides: script path, trigger keywords,
+    needs_candidate_search, auto_fields.
+
+    To add a new MCP server:
+      1. Add entry to MCP/mcp_config.json  (script + keywords)
+      2. Create the FastMCP server script  (tool signatures = the schema)
+      Zero changes needed in this file.
+    """  # noqa: D205
+    from mcp_infra.registry import MCPRegistry
+    from mcp_infra.executor import MCPExecutor
+
+    print("\n🔧 EXECUTING MCP TOOL...")
+
+    tool_action = state.get("tool_action", {})
+    server_id = tool_action.get("server_id")
+    if not server_id:
+        state["answer"] = "❌ No tool action server detected."
+        return state
+
+    registry = MCPRegistry()
+    executor = MCPExecutor()
+
+    server_config = registry.get_server_config(server_id)
+    script_path = registry.get_script_path(server_id)
+    needs_candidate_search = server_config.get("needs_candidate_search", False)
+
+    # ─── LIVE SCHEMA DISCOVERY ─────────────────────────────────
+    # Discover tool name, required fields, and field examples from the server itself
+    tool_name = registry.get_tool_name(server_id)
+    required_fields = registry.get_required_fields(server_id)
+    field_examples = registry.get_field_examples(server_id)
+
+    print(f"   🎯 Server: {server_config.get('name', server_id)}")
+    print(f"   🔧 Tool  : {tool_name}")
+    print(f"   📋 Fields : {required_fields}")
+
+    # ─── STEP 1: Load pending action ───────────────────────────
+    conversation_context = state.get("conversation_context", {})
+    pending_action = conversation_context.get("pending_tool_action")
+
+    # ─── STEP 2: Extract fields from current query (LLM) ───────
+    # Pass candidate names so LLM doesn't confuse them with field values (e.g. interviewer_name)
+    known_candidates = [r.get("candidate_name", "") for r in state.get("final_results", [])]
+    if pending_action:
+        known_candidates += [c.get("candidate_name", "") for c in pending_action.get("candidates", [])]
+    known_candidates = [n for n in known_candidates if n]  # remove blanks
+    extracted = _extract_tool_fields(state["query"], required_fields, candidate_names=known_candidates)
+
+    # ─── STEP 3: Merge current + pending fields ─────────────────
+    if pending_action and pending_action.get("server_id") == server_id:
+        print("   🔄 Merging with pending tool action fields...")
+        collected = pending_action.get("collected_fields", {})
+        merged_fields = {
+            f: extracted.get(f) or collected.get(f)
+            for f in required_fields
         }
-        
-        if not details.job_role:
-            missing_fields.append("job_role")
-        if not details.company_name:
-            missing_fields.append("company_name")
-        if not details.interview_datetime:
-            missing_fields.append("interview_datetime")
-        if not details.interview_location:
-            missing_fields.append("interview_location")
-        if not details.interviewer_name:
-            missing_fields.append("interviewer_name")
-        
-        # ============= STEP 5: If fields missing, ASK for ALL of them =============
-        if missing_fields:
-            print(f"   ⚠️  {len(missing_fields)} field(s) still missing")
-            
-            # Save pending email action to conversation context
+        candidates = pending_action.get("candidates", state.get("final_results", []))
+    else:
+        merged_fields = {f: extracted.get(f) for f in required_fields}
+        candidates = state.get("final_results", []) if needs_candidate_search else []
+
+
+
+    # ─── STEP 4: Resolve candidates ────────────────────────────
+    if needs_candidate_search:
+        if not candidates:
+            qa = state.get("query_analysis", {})
+            ents = qa.get("entities", {})
+            ext_email = ents.get("email")
+            ext_name = (ents.get("names") or [None])[0]
+            if ext_email:
+                candidates = [{
+                    "resume_id": "external_" + ext_email.replace("@", "_at_"),
+                    "candidate_name": ext_name or "Candidate",
+                    "email": ext_email,
+                }]
+            else:
+                state["answer"] = "❌ No candidate found. Please specify a candidate name or email."
+                return state
+
+        valid = [c for c in candidates if c.get("email") and c.get("email") != "Not available"]
+        skipped = [c.get("candidate_name") for c in candidates if c not in valid]
+        if skipped:
+            print(f"   ⚠️  Skipping (no email): {skipped}")
+        if not valid:
+            state["answer"] = "❌ None of the found candidates have email addresses on file."
+            return state
+        candidates = valid
+        candidate_names = [c.get("candidate_name", "Unknown") for c in candidates]
+    else:
+        candidate_names = []
+
+    # ─── STEP 5+6: Call server, handle response ─────────────────
+    def _save_pending_and_ask(missing_fields_list, candidate_names_list):
+        """Save pending action and build ask-message."""
+        if "conversation_context" not in state:
+            state["conversation_context"] = {}
+        state["conversation_context"]["pending_tool_action"] = {
+            "server_id": server_id,
+            "collected_fields": merged_fields,
+            "candidates": candidates,
+            "missing_fields": missing_fields_list,
+        }
+        state["answer"] = _build_ask_message(candidate_names_list, missing_fields_list, field_examples)
+        print(f"   💬 Missing fields: {missing_fields_list}")
+
+    if needs_candidate_search:
+        results = []
+        for candidate in candidates:
+            params = {"resume_id": candidate.get("resume_id"), **merged_fields}
+            print(f"   📤 {tool_name} → {candidate.get('candidate_name')}...")
+            resp = executor.execute(script_path, tool_name, params)
+            resp["candidate"] = candidate.get("candidate_name", "Unknown")
+            results.append(resp)
+
+        missing_resp = next((r for r in results if r.get("status") == "missing_fields"), None)
+        if missing_resp:
+            _save_pending_and_ask(missing_resp.get("missing_fields", []), candidate_names)
+            return state
+
+        sent   = [r for r in results if r.get("status") in ("sent", "draft_only", "success")]
+        failed = [r for r in results if r.get("status") == "error"]
+        if sent:
+            state["tool_executed"] = True
+            state.get("conversation_context", {}).pop("pending_tool_action", None)
+            state["answer"] = _format_success_message(sent, failed, merged_fields, server_config)
+        else:
+            err = failed[0].get("message", "Unknown error") if failed else "No results"
+            state["answer"] = f"❌ {server_config.get('name', server_id)} failed: {err}"
+    else:
+        resp = executor.execute(script_path, tool_name, merged_fields)
+        if resp.get("status") == "missing_fields":
+            _save_pending_and_ask(resp.get("missing_fields", []), [])
+        elif resp.get("status") in ("success", "sent", "draft_only"):
+            state["tool_executed"] = True
+            # Store tool response for follow-up questions
             if "conversation_context" not in state:
                 state["conversation_context"] = {}
-            
-            state["conversation_context"]["pending_email_action"] = {
-                "job_role": details.job_role,
-                "company_name": details.company_name,
-                "interview_datetime": details.interview_datetime,
-                "interview_location": details.interview_location,
-                "interviewer_name": details.interviewer_name,
-                "candidates": candidates,
-                "missing_fields": missing_fields  # ✅ Store which fields are missing
+            state["conversation_context"].pop("pending_tool_action", None)
+            state["conversation_context"]["last_tool_response"] = {
+                "server_id": server_id,
+                "server_name": server_config.get("name", server_id),
+                "response": resp,
+                "query": state["query"],
             }
-            
-            candidate_names = [c.get("candidate_name", "Unknown") for c in candidates]
-            
-            # Build message listing ALL missing fields
-            ask_message = f"📧 **Preparing to send interview invitation to {', '.join(candidate_names)}**\n\n"
-            ask_message += "Please provide the following details:\n\n"
-            
-            field_examples = {
-                "job_role": ("Job Role", "e.g., 'Machine Learning Intern', 'Software Developer'"),
-                "company_name": ("Company Name", "e.g., 'Google', 'Microsoft', 'ABC Corporation'"),
-                "interview_datetime": ("Interview Date & Time", "e.g., 'March 15 at 2 PM', 'Tomorrow at 10 AM'"),
-                "interview_location": ("Interview Location", "e.g., 'Conference Room A', 'Google Meet', 'Zoom'"),
-                "interviewer_name": ("Interviewer Name", "e.g., 'Dr. Sharma', 'John from HR'")
-            }
-            
-            for i, field_key in enumerate(missing_fields, 1):
-                name, example = field_examples[field_key]
-                ask_message += f"{i}. **{name}:** ({example})\n"
-            
-            state["answer"] = ask_message
-            print(f"   💬 Asking user for {len(missing_fields)} missing field(s)")
-            return state
-        
-        # ============= STEP 6: All fields complete - SEND EMAIL =============
-        print(f"   ✅ All 5 fields complete! Sending emails...")
-        print(f"   💼 Role: {details.job_role}")
-        print(f"   🏢 Company: {details.company_name}")
-        print(f"   📅 Date/Time: {details.interview_datetime}")
-        print(f"   📍 Location: {details.interview_location}")
-        print(f"   👤 Interviewer: {details.interviewer_name}")
-        
-        # Clear pending email action (email being sent now)
-        if "pending_email_action" in state.get("conversation_context", {}):
-            del state["conversation_context"]["pending_email_action"]
-        
-        # Send emails (same logic as before)
-        results = []
-        for idx, candidate in enumerate(candidates, 1):
-            resume_id = candidate.get("resume_id")
-            candidate_name = candidate.get("candidate_name", "Unknown")
-            candidate_email = candidate.get("email")
-            
-            if not candidate_email or candidate_email == "Not available":
-                results.append({"candidate": candidate_name, "status": "skipped", "reason": "No email address"})
-                continue
-            
-            print(f"\n   📤 [{idx}/{len(candidates)}] Sending to {candidate_name} ({candidate_email})...")
-            
-            try:
-                loop = asyncio.get_running_loop()
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        asyncio.run,
-                        call_mcp_email_server(
-                            resume_id=resume_id,
-                            job_role=details.job_role,
-                            company_name=details.company_name,
-                            interview_datetime=details.interview_datetime,
-                            interview_location=details.interview_location,
-                            interviewer_name=details.interviewer_name
-                        )
-                    )
-                    result = future.result()
-            except RuntimeError:
-                result = asyncio.run(call_mcp_email_server(
-                    resume_id=resume_id,
-                    job_role=details.job_role,
-                    company_name=details.company_name,
-                    interview_datetime=details.interview_datetime,
-                    interview_location=details.interview_location,
-                    interviewer_name=details.interviewer_name
-                ))
-            
-            if result.get("status") == "sent":
-                results.append({
-                    "candidate": candidate_name,
-                    "email": result.get("to", candidate_email),
-                    "status": "sent"
-                })
-            else:
-                results.append({
-                    "candidate": candidate_name,
-                    "email": candidate_email,
-                    "status": "failed",
-                    "reason": result.get("message", "Unknown error")
-                })
-        
-        # Generate success message
-        sent_count = sum(1 for r in results if r["status"] == "sent")
-        
-        if sent_count > 0:
-            state["email_sent"] = True
-            answer_parts = [f"✅ **Interview invitations sent to {sent_count} candidate(s)!**\n"]
-            answer_parts.append(f"📧 **Email Details:**")
-            answer_parts.append(f"- Role: {details.job_role}")
-            answer_parts.append(f"- Company: {details.company_name}")
-            answer_parts.append(f"- Interview: {details.interview_datetime}")
-            answer_parts.append(f"- Location: {details.interview_location}\n")
-            answer_parts.append(f"**Sent to:**")
-            for r in results:
-                if r["status"] == "sent":
-                    answer_parts.append(f"  ✅ {r['candidate']} ({r['email']})")
-            
+            # Build rich answer from all response data (not just "message")
+            answer_parts = [f"✅ {resp.get('message', 'Done!')}"]
+            # Include any extra structured data the server returned
+            skip_keys = {"status", "message"}
+            for key, value in resp.items():
+                if key in skip_keys:
+                    continue
+                label = key.replace("_", " ").title()
+                if isinstance(value, dict):
+                    # Render dict as bullet list (e.g., profile info)
+                    answer_parts.append(f"\n**{label}:**")
+                    for k, v in value.items():
+                        answer_parts.append(f"- {k.replace('_', ' ').title()}: {v}")
+                elif isinstance(value, list):
+                    # Render list (e.g., repos, languages)
+                    answer_parts.append(f"\n**{label}:**")
+                    for item in value[:10]:
+                        if isinstance(item, dict):
+                            summary = ", ".join(f"{k}: {v}" for k, v in item.items())
+                            answer_parts.append(f"- {summary}")
+                        else:
+                            answer_parts.append(f"- {item}")
+                elif isinstance(value, str) and len(value) > 100:
+                    # Long text (e.g., job_description) — render as block
+                    answer_parts.append(f"\n{value}")
+                else:
+                    answer_parts.append(f"- **{label}:** {value}")
             state["answer"] = "\n".join(answer_parts)
         else:
-            state["answer"] = "❌ Failed to send emails."
-            
-    except Exception as e:
-        state["answer"] = f"❌ Error: {str(e)}"
-        print(f"   ❌ Error: {str(e)}")
-    
+            state["answer"] = f"❌ {resp.get('message', 'Unknown error')}"
+
     return state
-
-
-async def call_mcp_email_server(
-    resume_id: str,
-    job_role: str,
-    company_name: str,
-    interview_datetime: str,
-    interview_location: str,
-    interviewer_name: str,
-    tone: str = "professional"
-):
-    """Call the MCP interview_invite_sender.py server"""
-    
-    # Find fastmcp executable
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    fastmcp_cmd = shutil.which("fastmcp")
-    if not fastmcp_cmd:
-        venv_fastmcp = os.path.join(project_root, "myenv311", "Scripts", "fastmcp.exe")
-        if os.path.exists(venv_fastmcp):
-            fastmcp_cmd = venv_fastmcp
-        else:
-            return {"status": "error", "message": "fastmcp not found"}
-    
-    server_params = StdioServerParameters(
-        command=fastmcp_cmd,
-        args=["run", os.path.join(project_root, "MCP", "interview_invite_sender.py")],
-        env=None
-    )
-    
-    try:
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                
-                result = await session.call_tool(
-                    "send_interview_invite",
-                    arguments={
-                        "resume_id": resume_id,
-                        "job_role": job_role,
-                        "company_name": company_name,
-                        "interview_datetime": interview_datetime,
-                        "interview_location": interview_location,
-                        "interviewer_name": interviewer_name,
-                        "tone": tone
-                    }
-                )
-                
-                if result.content:
-                    return json.loads(result.content[0].text)
-                return {"status": "error", "message": "No result from MCP server"}
-                
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 
 def generate_answer_node(state: AgentState) -> AgentState:
@@ -1757,8 +1764,36 @@ def generate_answer_node(state: AgentState) -> AgentState:
 
     print("\n🤖 GENERATING ANSWER...")
     
+    # Check if this is a follow-up question about the last tool response
+    conversation_context = state.get("conversation_context", {})
+    last_tool = conversation_context.get("last_tool_response")
+    if last_tool and not state.get("final_results"):
+        # No search was run — answer from stored tool data
+        print(f"   💬 Follow-up about {last_tool['server_name']}")
+        # Use LLM to answer based on the stored response
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        import json
+        resp_json = json.dumps(last_tool["response"], indent=2)
+        answer = llm.invoke([
+            SystemMessage(content="You are answering a follow-up question about a tool response. "
+                                "Answer based on the data provided. Be concise and direct."),
+            HumanMessage(content=f"Previous tool: {last_tool['server_name']}\n"
+                               f"Previous query: {last_tool['query']}\n"
+                               f"Tool response data:\n{resp_json}\n\n"
+                               f"Follow-up question: {state['query']}\n\n"
+                               f"Answer the question using ONLY the data above.")
+        ]).content
+        state["answer"] = answer
+        print(f"   ✅ Follow-up answer generated")
+        return state
+    
     # Handle aggregation queries - return the number directly
     analysis = state.get("query_analysis", {})
+    if analysis.get("query_type") == "greeting":
+        state["answer"] = "Hello! I'm here to help you with your resume-related queries."
+        return state
     if analysis.get("is_aggregation_query", False):
         aggregation_result = state.get("aggregation_result", 0)
         query_lower = state["query"].lower()
@@ -1962,33 +1997,56 @@ def create_intelligent_agent() -> StateGraph:
     workflow.add_node("vector_search", vector_search_node)
     workflow.add_node("enrich_results", enrich_results_node)
     workflow.add_node("fetch_context_candidates", fetch_context_candidates_node)  # NEW: For Q&A queries
-    workflow.add_node("send_email", send_email_via_mcp_node)  # NEW: For email actions
+    workflow.add_node("execute_mcp_tool", execute_mcp_tool_node)  # Generic: handles any MCP server
     workflow.add_node("generate_answer", generate_answer_node)
 
     # Define edges
     workflow.set_entry_point("analyze_query")
     
     # Add conditional routing after analysis
-    # - If email action → search for candidate, then send email
+    # - If follow-up question about last tool response → generate answer directly
+    # - If tool action that needs candidates → search first, then execute tool
+    # - If tool action without candidate search → skip search, execute tool directly
     # - If Q&A query → fetch candidates from context, then generate answer
     # - Otherwise → proceed to SQL filtering
-    def route_after_analysis(state: AgentState) -> Literal["sql_filter", "fetch_context_candidates"]:
+    def route_after_analysis(state: AgentState) -> Literal["sql_filter", "fetch_context_candidates", "execute_mcp_tool", "generate_answer"]:
         """Route based on query type"""
-        # Email action: search for candidate first
-        if state.get("is_email_action", False):
-            return "sql_filter"  # Find candidate, then send email
+        # Check for follow-up questions about the last tool response
+        conversation_context = state.get("conversation_context", {})
+        last_tool = conversation_context.get("last_tool_response")
+        tool_action = state.get("tool_action", {})
         
+        if last_tool and not tool_action:
+            # There's a stored tool response but no new tool was triggered
+            # This is almost certainly a follow-up question about the previous tool result
+            print("   💬 Detected follow-up question about previous tool response")
+            return "generate_answer"
+        
+        # Tool action: check if it needs candidate search
+        if tool_action:
+            needs_search = tool_action.get("needs_candidate_search", False)
+            if needs_search:
+                return "sql_filter"  # Find candidate first, then execute tool
+            else:
+                print("   ⚡ Skipping search: tool doesn't need candidates")
+                return "execute_mcp_tool"  # Direct execution
+
         # Q&A query: use context
         analysis = state.get("query_analysis", {})
         if analysis.get("is_qa_query", False):
-            return "fetch_context_candidates"  # Fetch context candidates, then answer
-        
-        return "sql_filter"  # Normal search
+            return "fetch_context_candidates"
+
+        return "sql_filter"
     
     workflow.add_conditional_edges(
         "analyze_query",
         route_after_analysis,
-        {"sql_filter": "sql_filter", "fetch_context_candidates": "fetch_context_candidates"}
+        {
+            "sql_filter": "sql_filter",
+            "fetch_context_candidates": "fetch_context_candidates",
+            "execute_mcp_tool": "execute_mcp_tool",
+            "generate_answer": "generate_answer"
+        }
     )
     
     # Q&A queries: fetch context → generate answer
@@ -1998,21 +2056,21 @@ def create_intelligent_agent() -> StateGraph:
     workflow.add_edge("llm_sql_generation", "vector_search")
     workflow.add_edge("vector_search", "enrich_results")
     
-    # After enriching results, check if email action
-    def route_after_enrich(state: AgentState) -> Literal["send_email", "generate_answer"]:
-        """Route to email sending if email action, otherwise generate answer"""
-        if state.get("is_email_action", False) and not state.get("email_sent", False):
-            return "send_email"
+    # After enriching results: run MCP tool if requested, else generate answer
+    def route_after_enrich(state: AgentState) -> Literal["execute_mcp_tool", "generate_answer"]:
+        """Route to MCP tool execution if a tool action is pending, else generate answer."""
+        if state.get("tool_action") and not state.get("tool_executed", False):
+            return "execute_mcp_tool"
         return "generate_answer"
-    
+
     workflow.add_conditional_edges(
         "enrich_results",
         route_after_enrich,
-        {"send_email": "send_email", "generate_answer": "generate_answer"}
+        {"execute_mcp_tool": "execute_mcp_tool", "generate_answer": "generate_answer"}
     )
-    
-    # Email sent → END (answer already generated in email node)
-    workflow.add_edge("send_email", END)
+
+    # Tool executed → END (answer already set in execute_mcp_tool_node)
+    workflow.add_edge("execute_mcp_tool", END)
 
     # Conditional retry logic
     workflow.add_conditional_edges(
