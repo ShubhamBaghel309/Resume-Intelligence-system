@@ -9,6 +9,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 import json
+from typing import Annotated
+from pydantic import Field
 
 load_dotenv()
 TEST_MODE=False  # Set to True to send to test emails instead of real candidates
@@ -28,17 +30,20 @@ DB_PATH = os.path.join(
 
 @mcp.tool()
 def send_interview_invite(
-    resume_id: str,
-    job_role: str,
-    company_name: str,
-    interview_datetime: str,
-    interview_location: str,
-    interviewer_name: str,
-    tone: str = "professional"
+    resume_id: Annotated[str, Field(description="Candidate's resume ID from database")],
+    job_role: Annotated[str | None, Field(description="Position they're being interviewed for (e.g., 'Senior Python Developer')")] = None,
+    company_name: Annotated[str | None, Field(description="Your company name (e.g., 'Google', 'Microsoft')")] = None,
+    interview_datetime: Annotated[str | None, Field(description="Date and time (e.g., 'January 30, 2026 at 2:00 PM')")] = None,
+    interview_location: Annotated[str | None, Field(description="Location or platform (e.g., 'Google Meet', 'Office - 5th Floor')")] = None,
+    interviewer_name: Annotated[str | None, Field(description="Who will conduct the interview (e.g., 'Dr. Sharma', 'John from HR')")] = None,
+    tone: Annotated[str, Field(description="Email tone - 'professional', 'friendly', or 'enthusiastic'")] = "professional"
 ):
     """
     Send personalized interview invitation email to a candidate.
-    
+
+    All fields except resume_id are optional so the server can validate and
+    return a structured missing_fields response rather than crashing.
+
     Args:
         resume_id: Candidate's resume ID from database
         job_role: Position they're being interviewed for (e.g., "Senior Python Developer")
@@ -47,11 +52,36 @@ def send_interview_invite(
         interview_location: Location or platform (e.g., "Google Meet" or "Office - 5th Floor")
         interviewer_name: Who will conduct the interview
         tone: Email tone - "professional", "friendly", or "enthusiastic"
-    
+
     Returns:
-        Dict with status and email details
+        Dict with status:
+        - {"status": "success" | "sent" | "draft_only", "message": "...", "to": "...", ...}
+        - {"status": "missing_fields", "missing_fields": [...], "message": "..."}
+        - {"status": "error", "message": "..."}
     """
-    
+
+    # ============= Server-side field validation =============
+    # Validation lives HERE in the server, not in the agent.
+    # Adding a new required field only needs a change in this file + mcp_config.json.
+    missing_fields = []
+    if not job_role:
+        missing_fields.append("job_role")
+    if not company_name:
+        missing_fields.append("company_name")
+    if not interview_datetime:
+        missing_fields.append("interview_datetime")
+    if not interview_location:
+        missing_fields.append("interview_location")
+    if not interviewer_name:
+        missing_fields.append("interviewer_name")
+
+    if missing_fields:
+        return {
+            "status": "missing_fields",
+            "missing_fields": missing_fields,
+            "message": f"Missing required fields: {', '.join(missing_fields)}"
+        }
+
     # Step 1: Fetch candidate details from database
     # Special case: External candidates (not in database) have resume_id starting with "external_"
     if resume_id.startswith("external_"):
@@ -207,13 +237,13 @@ Keep it concise (under 200 words), warm, and {tone}.
 
 @mcp.tool()
 def send_bulk_interview_invites(
-    resume_ids_json: str,
-    job_role: str,
-    company_name: str,
-    interview_datetime: str,
-    interview_location: str,
-    interviewer_name: str,
-    tone: str = "professional"
+    resume_ids_json: Annotated[str, Field(description="JSON array of resume IDs, e.g., '[\"id1\", \"id2\"]'")],
+    job_role: Annotated[str, Field(description="Position they're being interviewed for (e.g., 'Senior Python Developer')")],
+    company_name: Annotated[str, Field(description="Your company name (e.g., 'Google', 'Microsoft')")],
+    interview_datetime: Annotated[str, Field(description="Date and time (e.g., 'January 30, 2026 at 2:00 PM')")],
+    interview_location: Annotated[str, Field(description="Location or platform (e.g., 'Google Meet', 'Office - 5th Floor')")],
+    interviewer_name: Annotated[str, Field(description="Who will conduct the interview (e.g., 'Dr. Sharma', 'John from HR')")],
+    tone: Annotated[str, Field(description="Email tone - 'professional', 'friendly', or 'enthusiastic'")] = "professional"
 ):
     """
     Send interview invites to multiple candidates at once.

@@ -18,6 +18,7 @@ project_root = os.path.dirname(script_dir)
 sys.path.insert(0, project_root)
 
 from app.workflows.intelligent_agent import ResumeIntelligenceAgent
+from app.mcp_infra.registry import MCPRegistry
 
 # MCP imports
 try:
@@ -321,17 +322,18 @@ async def main_async():
             logger.log_file.write(f"[{datetime.now().strftime('%H:%M:%S')}] SESSION: {session_id}, CANDIDATES: {len(result.get('candidate_ids', []))}\n\n")
             logger.log_file.flush()
             
-            # ✅ If agent is collecting email fields, collect ALL fields via form-style input
-            if conversation_context.get("pending_email_action"):
-                pending = conversation_context["pending_email_action"]
+            # ✅ If agent is collecting tool fields, collect ALL fields via form-style input
+            if conversation_context.get("pending_tool_action"):
+                pending = conversation_context["pending_tool_action"]
                 missing = pending.get("missing_fields", [])
+                server_id = pending.get("server_id", "")
                 
+                # Dynamic field labels from registry (schema-driven)
+                _registry = MCPRegistry()
+                field_examples = _registry.get_field_examples(server_id) if server_id else {}
                 field_prompts = {
-                    "job_role": "Job Role",
-                    "company_name": "Company Name",
-                    "interview_datetime": "Interview Date & Time",
-                    "interview_location": "Interview Location",
-                    "interviewer_name": "Interviewer Name"
+                    k: field_examples.get(k, {}).get("label", k.replace("_", " ").title())
+                    for k in missing
                 }
                 
                 print("\n" + "-"*50)
@@ -341,21 +343,22 @@ async def main_async():
                 collected = {}
                 for i, field_key in enumerate(missing, 1):
                     prompt_label = field_prompts.get(field_key, field_key)
-                    value = input(f"  {i}. {prompt_label}: ").strip()
+                    meta = field_examples.get(field_key, {})
+                    example_text = meta.get("example", "") if isinstance(meta, dict) else str(meta)
+                    hint = f" ({example_text})" if example_text else ""
+                    value = input(f"  {i}. {prompt_label}{hint}: ").strip()
                     if value.lower() == 'exit':
                         break
                     collected[field_key] = value
                 
                 if len(collected) == len(missing):
                     # Build a complete query string with all fields for the agent
-                    parts = []
-                    for field_key, value in collected.items():
-                        parts.append(f"{field_prompts[field_key]}: {value}")
+                    parts = [f"{field_prompts[k]}: {v}" for k, v in collected.items()]
                     next_query = ", ".join(parts)
                     print(f"\n⏳ Sending all details to agent...")
                     continue
                 else:
-                    print("\n❌ Email cancelled.")
+                    print("\n❌ Action cancelled.")
                     conversation_context = {}  # Clear pending action
                     continue
             
