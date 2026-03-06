@@ -1566,6 +1566,27 @@ def _format_success_message(sent: list, failed: list, fields: dict, server_confi
     return "\n".join(parts)
 
 
+def _extract_name_from_query(query: str, email: str) -> str:
+    """
+    Try to extract a candidate name from the query when a direct email is provided.
+    Falls back to the email prefix (without leading digits).
+    """
+    import re
+    query_without_email = query.replace(email, "").strip()
+    patterns = [
+        r"(?:send|invite|to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:at|@|on)",
+        r"invitation\s+to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        r"to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*(?:,|at|@)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, query_without_email, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    # Fallback: strip leading digits from email prefix
+    prefix = re.sub(r'^\d+', '', email.split('@')[0])
+    return prefix.capitalize()
+
+
 # ─────────────────────────────────────────────────────────────
 # Generic MCP Tool Node  (replaces send_email_via_mcp_node)
 # ─────────────────────────────────────────────────────────────
@@ -1641,7 +1662,23 @@ def execute_mcp_tool_node(state: AgentState) -> AgentState:
 
     # ─── STEP 4: Resolve candidates ────────────────────────────
     if needs_candidate_search:
-        if not candidates:
+        # Check if user directly provided an email in the current query.
+        # If so, always override candidates to ONLY that email — even if
+        # final_results has data from a prior search (avoids bulk-sending).
+        import re as _re
+        _direct_email_match = _re.search(
+            r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b',
+            state.get("query", "")
+        )
+        if _direct_email_match:
+            _direct_email = _direct_email_match.group(0)
+            print(f"   📧 Direct email detected in query: {_direct_email} — overriding candidate list")
+            candidates = [{
+                "resume_id": "external_" + _direct_email.replace("@", "_at_"),
+                "candidate_name": _extract_name_from_query(state.get("query", ""), _direct_email),
+                "email": _direct_email,
+            }]
+        elif not candidates:
             qa = state.get("query_analysis", {})
             ents = qa.get("entities", {})
             ext_email = ents.get("email")
@@ -2011,25 +2048,37 @@ def create_intelligent_agent() -> StateGraph:
     # - Otherwise → proceed to SQL filtering
     def route_after_analysis(state: AgentState) -> Literal["sql_filter", "fetch_context_candidates", "execute_mcp_tool", "generate_answer"]:
         """Route based on query type"""
-        # Check for follow-up questions about the last tool response
+        import re as _re
         conversation_context = state.get("conversation_context", {})
         last_tool = conversation_context.get("last_tool_response")
         tool_action = state.get("tool_action", {})
-        
+
+        # ── Follow-up about a previous tool result (no new tool triggered) ──
         if last_tool and not tool_action:
-            # There's a stored tool response but no new tool was triggered
-            # This is almost certainly a follow-up question about the previous tool result
             print("   💬 Detected follow-up question about previous tool response")
             return "generate_answer"
-        
-        # Tool action: check if it needs candidate search
+
         if tool_action:
             needs_search = tool_action.get("needs_candidate_search", False)
+
             if needs_search:
-                return "sql_filter"  # Find candidate first, then execute tool
+                # ── Optimisation 1: pending tool action (user is filling missing fields) ──
+                # Candidates are already saved in pending_tool_action; skip search entirely.
+                if conversation_context.get("pending_tool_action", {}).get("server_id") == tool_action.get("server_id"):
+                    print("   ⚡ Skipping search: resuming pending tool action (fields already collected)")
+                    return "execute_mcp_tool"
+
+                # ── Optimisation 2: direct email supplied in query ──
+                # No need to search the DB — the target is explicit.
+                _query = state.get("query", "")
+                if _re.search(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b', _query):
+                    print("   ⚡ Skipping search: direct email detected in query")
+                    return "execute_mcp_tool"
+
+                return "sql_filter"  # Normal candidate-search path
             else:
                 print("   ⚡ Skipping search: tool doesn't need candidates")
-                return "execute_mcp_tool"  # Direct execution
+                return "execute_mcp_tool"
 
         # Q&A query: use context
         analysis = state.get("query_analysis", {})
