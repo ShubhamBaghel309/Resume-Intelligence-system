@@ -610,14 +610,62 @@ STEP 4: CHOOSE SEARCH STRATEGY
 - Use when: Clear filters, no semantic ranking needed, want ALL matches
 
 **vector_first** - Semantic search ONLY (no SQL filtering):
-- Subjective keywords: "rare", "unique", "interesting", "innovative", "creative", "impressive", "exceptional"
-- Examples: "Most rare projects", "Unique backgrounds", "Similar to Elon Musk"
+- Subjective/qualitative keywords: "rare", "unique", "interesting", "innovative",
+  "creative", "impressive", "exceptional", "outstanding", "remarkable",
+  "groundbreaking", "cutting-edge", "visionary", "standout"
+- Abstract human qualities that CANNOT be stored in a database column:
+  "leadership", "communication skills", "analytical thinking",
+  "problem-solving", "self-starter", "proactive", "growth mindset",
+  "entrepreneurial", "cross-functional", "T-shaped", "well-rounded",
+  "renaissance", "continuous learning"
+- Similarity/profile matching: "Similar to Elon Musk", "startup founder profile"
+- Examples: "Most rare projects", "Unique backgrounds", "Strong leadership qualities",
+  "People with entrepreneurial backgrounds", "Find renaissance engineers",
+  "Find the most impressive resumes", "Show candidates with exceptional backgrounds"
 - Returns: Top 10 semantically relevant
-- Use when: CANNOT determine with SQL logic
+- IMPORTANT: Generic nouns like "resumes", "candidates", "profiles", "backgrounds",
+  "people", "engineers" are NOT concrete SQL-filterable criteria. Only SPECIFIC VALUES count
+  as concrete SQL filters: skill names (Python, Java, TensorFlow), location names (Bangalore,
+  Delhi), institute names (IIT, NIT), experience numbers (3+ years), degree names (B.Tech, MBA).
+- Use when: Query contains NO concrete SQL-filterable criterion — ONLY subjective/abstract terms
 
 **hybrid** - SQL filter + vector ranking:
-- "Python developers with interesting projects"
-- SQL filters exact criteria (Python), vector ranks by relevance
+- DECISION PROCEDURE — follow these 2 steps:
+  Step A: Does the query contain a CONCRETE SQL-FILTERABLE value?
+    Concrete = specific skill name, specific location, specific institute, experience number,
+    specific degree. Examples: Python, Java, TensorFlow, Docker, NLP, React, Angular, AWS,
+    Bangalore, Mumbai, Pune, Hyderabad, IIT, NIT, BITS, B.Tech, MBA, 5+ years, 3 years.
+  Step B: Does the query ALSO contain a SUBJECTIVE/QUALITATIVE word?
+    Subjective = impressive, creative, innovative, outstanding, remarkable, unique,
+    groundbreaking, cutting-edge, visionary, standout, interesting, exceptional, rare.
+  → If BOTH Step A and Step B are YES → choose **hybrid**
+  → If ONLY Step A is YES (no subjective word) → choose **sql_only**
+  → If ONLY Step B is YES (no concrete filter) → choose **vector_first**
+
+- Examples of hybrid queries (BOTH concrete + subjective):
+  • "Python developers with creative projects" → SQL: Python, Vector: creative
+  • "Java engineers with impressive work experience" → SQL: Java, Vector: impressive
+  • "React developers with innovative side projects" → SQL: React, Vector: innovative
+  • "IIT graduates with exceptional achievements" → SQL: IIT, Vector: exceptional
+  • "ML engineers with cutting-edge research" → SQL: ML, Vector: cutting-edge
+  • "TensorFlow experts with groundbreaking research" → SQL: TensorFlow, Vector: groundbreaking
+  • "Docker specialists with innovative DevOps solutions" → SQL: Docker, Vector: innovative
+  • "NLP engineers with impressive publications" → SQL: NLP, Vector: impressive
+  • "Full-stack developers with standout contributions" → SQL: full-stack, Vector: standout
+  • "Cloud architects with visionary approaches" → SQL: cloud, Vector: visionary
+  • "Data scientists with unique specializations" → SQL: data science, Vector: unique
+  • "B.Tech graduates with the most impressive internships" → SQL: B.Tech, Vector: impressive
+  • "Backend developers from Pune with outstanding system design" → SQL: backend+Pune, Vector: outstanding
+  • "Python and Java developers with creative problem-solving" → SQL: Python+Java, Vector: creative
+  • "5+ years candidates with outstanding project work" → SQL: 5+ years, Vector: outstanding
+  • "Candidates from Bangalore with remarkable portfolios" → SQL: Bangalore, Vector: remarkable
+
+- CRITICAL RULES:
+  1. If ANY subjective word appears ALONGSIDE ANY concrete filter → MUST be hybrid, NEVER sql_only!
+  2. If a concrete skill/location/degree exists but you also see qualitative words → hybrid, NEVER vector_first!
+  3. "Java engineers with impressive work experience" = hybrid (Java is concrete, impressive is subjective)
+  4. "Docker specialists with innovative solutions" = hybrid (Docker is concrete, innovative is subjective)
+- SQL filters exact criteria, vector ranks by relevance
 - Returns: Top 10 after filtering
 
 ════════════════════════════════
@@ -635,20 +683,36 @@ STEP 5: SQL COMPLEXITY DECISION
   
 - RANKINGS: "best", "top", "most", "highest", "lowest", "maximum", "minimum"
   • Example: "Who has the most experience?" → ORDER BY DESC LIMIT 1
-  • WARNING: Always use LLM SQL for rankings!
+  • Example: "Show the most experienced IIT graduate" → ORDER BY DESC LIMIT 1
+  • Example: "Top 3 Python developers by experience" → ORDER BY DESC LIMIT 3
+  • RULE: ANY superlative ("most experienced", "best", "top N") = use_llm_sql = True
+  • WARNING: Always use LLM SQL for rankings! Even single-result rankings!
   
-- COMPLEX LOGIC: 4+ OR clauses, nested conditions
+- COMPLEX LOGIC: ANY use of parentheses, OR operators, AND operators, or nested conditions
   • Example: "(Python OR Java) AND (AWS OR Azure OR GCP)"
+  • Example: "(ML OR AI OR DL) skills"
+  • Example: "(React OR Angular OR Vue) developers"
+  • Example: "(Docker OR Kubernetes) AND (AWS OR GCP)"
+  • Example: "Python or Java developers" (even without parentheses, OR logic = LLM SQL)
+  • RULE: If query contains OR between skills/institutes/locations → use_llm_sql = True
+  • RULE: If query contains parentheses with boolean logic → use_llm_sql = True
+  • WARNING: Even 2 items joined by OR requires LLM SQL! Do NOT treat "X or Y" as simple.
+  • When use_llm_sql=True for complex logic, keep search_strategy=sql_only (NOT hybrid)
+    unless there is ALSO a subjective/qualitative word requiring vector ranking.
 
 Set sql_complexity_reason to explain your decision.
 
 ════════════════════════════════
 STEP 6: EMAIL ACTION DETECTION
 ════════════════════════════════
-**Set query_type = "email_action"** if query asks to SEND EMAIL/INTERVIEW INVITE:
+**Set query_type = "email_action"** ONLY if query asks to SEND/DELIVER an email or invitation:
 - "Send interview email to X"
 - "Send invitation to shubham@example.com"
 - "Email interview invite to candidate X"
+Do NOT set email_action for queries that merely MENTION interviews without sending:
+- "Suggest interview questions" → NOT email_action (this is Q&A)
+- "Prepare behavioral questions" → NOT email_action (this is Q&A)
+- "Recommend assessment areas" → NOT email_action (this is Q&A)
 
 Extract candidate name/email to entities.
 
@@ -698,8 +762,11 @@ These queries use data from PREVIOUS conversation context - NO database search n
             matched_server = registry.match_intent(state["query"])
 
             # 2. LLM fallback for backward compat (e.g., query_type == "email_action")
-            if not matched_server and analysis.query_type == "email_action":
-                matched_server = "interview_email"
+            #    Guard: only trust this if (a) not a Q&A query and (b) query has send/email/invite words
+            if not matched_server and analysis.query_type == "email_action" and not analysis.is_qa_query:
+                _q_lower = state.get("query", "").lower()
+                if any(w in _q_lower for w in ("send", "email", "invite", "invitation")):
+                    matched_server = "interview_email"
 
             # 3. Continuation: pending tool action from previous turn
             conversation_context = state.get("conversation_context", {})
