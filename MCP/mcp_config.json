@@ -12,18 +12,6 @@
       "auto_fields": ["resume_id"]
     },
 
-    "calculator": {
-      "name": "Calculator",
-      "script": "MCP/calculatorMCPserver.py",
-      "description": "Perform basic arithmetic: add, subtract, multiply, divide",
-      "trigger_keywords": [
-        "calculate", "add", "subtract", "multiply", "divide",
-        "what is", "sum of", "product of", "difference of"
-      ],
-      "needs_candidate_search": false,
-      "auto_fields": []
-    },
-
     "github_profile": {
       "name": "GitHub Profile Checker",
       "script": "MCP/github_profile_server.py",

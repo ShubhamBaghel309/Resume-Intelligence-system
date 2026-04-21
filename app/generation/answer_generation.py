@@ -6,10 +6,10 @@ import os
 import json
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI            
 # Initialize LLMs
-load_dotenv()
-# API key loaded from .env file
+load_dotenv()                                                                            
+# API key loaded from .env file               
 
 # Primary LLM: OpenAI (good balance, may have rate limits)
 llm_openai = ChatOpenAI(
@@ -219,7 +219,97 @@ def format_resume_for_context(resume_data: dict, include_full_text: bool = False
     return "\n".join(parts)
 
 
-def generate_answer(query: str, search_results: list, conversation_history: list = None, format_as_list: bool = False) -> str:
+def _safe_json_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _generate_rule_based_answer(query: str, search_results: list, dropped_filters: list = None) -> str:
+    """Local fallback answer generation when remote LLMs are unavailable."""
+    if not search_results:
+        return "I couldn't find any candidates matching your criteria. Try broadening your search or adjusting the filters."
+
+    query_lower = (query or "").lower()
+    intro = ""
+    if dropped_filters:
+        intro = (
+            f"I couldn't satisfy the exact constraints, so I broadened the search by dropping: {', '.join(dropped_filters)}.\n\n"
+        )
+
+    if len(search_results) == 1:
+        candidate = search_results[0]
+        name = candidate.get("candidate_name") or "Unknown candidate"
+        role = candidate.get("current_role") or "Role not specified"
+        exp = candidate.get("total_experience_years")
+        exp_text = f"{exp} years of experience" if exp is not None else "experience not specified"
+
+        if any(token in query_lower for token in ["experience", "work", "worked", "role"]):
+            jobs = _safe_json_list(candidate.get("work_experience"))
+            lines = [f"{name} is currently listed as {role} with {exp_text}."]
+            if jobs:
+                lines.append("Work experience:")
+                for job in jobs[:6]:
+                    if isinstance(job, dict):
+                        company = job.get("company", "Unknown company")
+                        job_role = job.get("role", "Role not specified")
+                        duration = job.get("duration", "Duration not specified")
+                        lines.append(f"- {job_role} at {company} ({duration})")
+            return intro + "\n".join(lines)
+
+        if "project" in query_lower:
+            projects = _safe_json_list(candidate.get("projects"))
+            if projects:
+                lines = [f"Projects for {name}:"]
+                for project in projects[:6]:
+                    if isinstance(project, dict):
+                        project_name = project.get("name", "Unnamed project")
+                        tech = project.get("technologies", [])
+                        tech_text = ", ".join(tech[:5]) if isinstance(tech, list) else str(tech)
+                        suffix = f" | Technologies: {tech_text}" if tech_text else ""
+                        lines.append(f"- {project_name}{suffix}")
+                return intro + "\n".join(lines)
+
+        if any(token in query_lower for token in ["education", "degree", "college", "university", "institute"]):
+            education = _safe_json_list(candidate.get("education"))
+            if education:
+                lines = [f"Education for {name}:"]
+                for item in education[:4]:
+                    if isinstance(item, dict):
+                        degree = item.get("degree", "Degree not specified")
+                        institute = item.get("institute", "Institute not specified")
+                        year = item.get("year", "Year not specified")
+                        lines.append(f"- {degree} from {institute} ({year})")
+                return intro + "\n".join(lines)
+
+        if "skill" in query_lower:
+            skills = _safe_json_list(candidate.get("skills"))
+            if skills:
+                return intro + f"Skills for {name}: {', '.join(str(skill) for skill in skills[:15])}"
+
+        return intro + f"{name} is currently listed as {role} with {exp_text}."
+
+    lines = [f"Found {len(search_results)} candidates:"]
+    for index, candidate in enumerate(search_results[:10], start=1):
+        name = candidate.get("candidate_name") or "Unknown candidate"
+        role = candidate.get("current_role") or "Role not specified"
+        exp = candidate.get("total_experience_years")
+        location = candidate.get("location") or "Location not specified"
+        exp_text = f"{exp} yrs" if exp is not None else "exp n/a"
+        lines.append(f"{index}. {name} | {role} | {exp_text} | {location}")
+
+    return intro + "\n".join(lines)
+
+
+def generate_answer(query: str, search_results: list, conversation_history: list = None, format_as_list: bool = False, dropped_filters: list = None) -> str:
     """
     Generate natural language answer from search results
     
@@ -263,7 +353,11 @@ def generate_answer(query: str, search_results: list, conversation_history: list
         history_text = "\n\nPrevious Conversation:\n"
         for msg in conversation_history[-3:]:  # Last 3 exchanges
             history_text += f"{msg['role']}: {msg['content']}\n"
-    
+            
+    dropped_filters_text = ""
+    if dropped_filters:
+        dropped_filters_text = f"\n⚠️ NOTE TO AI: The user's query was originally too strict and returned 0 results. To find candidates, the following strict filters were gracefully dropped by the system: {', '.join(dropped_filters)}. You MUST inform the user about this in your response and ask a clarifying question if needed.\n"
+
     # Create prompt
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are an intelligent recruitment assistant that helps recruiters find, analyze, and evaluate candidates strictly from a provided resume database (search results).
@@ -308,12 +402,34 @@ You will receive resume data in multiple formats:
 
 ────────────────────────────────RESPONSE FORMAT GUIDELINES
 ────────────────────────────────
+1. **Focus:** Only answer what the user asks
+2. **Comparisons:** Use bullet points or a short markdown table
+3. **Clarity:** Keep sentences short and clear
+4. **Accuracy:** Use exact quotes or snippets when asked to summarize experience
+5. **No Hallucinations:** Say "I couldn't find this information in the resume" if something is missing
+
+────────────────────────────────SKILL AUDIT / INFLATION DETECTION
+────────────────────────────────
+If the user asks to verify, validate, or audit a candidate's skills (e.g. 'Are his skills genuine?', 'Check for skill inflation'):
+1. Compare the skills listed in the candidate's 'skills' array against the concrete evidence found in their 'work_experience' and 'projects'.
+2. Categorize the skills clearly into:
+   - **✅ Verified Skills:** Strong evidence in experience or projects.
+   - **⚠️ Plausible Skills:** Weak or implied evidence.
+   - **🚩 Unverified / Potentially Inflated:** Listed in skills but no mention outside the skills list.
+3. Provide a brief 'Skill Trust Score' or summary of your findings.
 - Use a clear structure with bullet points or numbered lists when helpful
 - Mention candidate names prominently
 - Include only relevant skills and experience for the query
 - Keep responses concise but informative
 - Maintain a professional, recruiter-focused tone
 - Provide contact information ONLY if explicitly requested
+
+────────────────────────────────CLARIFICATION PROTOCOL / AMBIGUITY HANDLING
+────────────────────────────────
+If the initial user query was ambiguous, based on false assumptions, or too strict (resulting in 0 matches on strict criteria), the system may 'drop' some strict filters to find broader matches. 
+1. **Acknowledging Relaxed Filters:** If you receive a 'NOTE TO AI' indicating filters were dropped (e.g., location, company), you MUST explicitly inform the user that their exact constraints yielded 0 results, so you broadened the search. Provide the broader results.
+2. **Asking Clarifying Questions:** Conclude your response with ONE polite, targeted follow-up question to help the user refine their search or clarify their intent. 
+   - *Example:* "I couldn't find any Python developers specifically in 'Berlin', so I broadened the search to all locations. Here are 3 developers. Do you want to see if any of them are willing to relocate to Berlin, or would you prefer to search for remote candidates?"
 
 ────────────────────────────────
 DATA TRUST POLICY
@@ -326,6 +442,7 @@ DATA TRUST POLICY
         ("user", """Question: {query}
 
 {history}
+{dropped_filters_text}
 
 Search Results:
 {context}
@@ -341,7 +458,8 @@ Please provide a helpful answer based on these candidates.""")
         answer = chain.invoke({
             "query": query,
             "context": context,
-            "history": history_text
+            "history": history_text,
+            "dropped_filters_text": dropped_filters_text
         })
     except Exception as e:
         # If OpenAI fails (rate limit), fallback to Groq
@@ -352,7 +470,8 @@ Please provide a helpful answer based on these candidates.""")
                 answer = chain_groq.invoke({
                     "query": query,
                     "context": context,
-                    "history": history_text
+                    "history": history_text,
+                    "dropped_filters_text": dropped_filters_text
                 })
             except Exception as groq_error:
                 # If Groq also fails, fallback to Gemini
@@ -362,12 +481,15 @@ Please provide a helpful answer based on these candidates.""")
                     answer = chain_gemini.invoke({
                         "query": query,
                         "context": context,
-                        "history": history_text
+                        "history": history_text,
+                        "dropped_filters_text": dropped_filters_text
                     })
                 else:
-                    raise groq_error
+                    print(f"   ⚠️  Groq fallback failed: {groq_error}")
+                    return _generate_rule_based_answer(query, search_results, dropped_filters)
         else:
-            raise  # Re-raise if it's not a rate limit error
+            print(f"   ⚠️  LLM answer generation unavailable: {e}")
+            return _generate_rule_based_answer(query, search_results, dropped_filters)
     
     return answer
 

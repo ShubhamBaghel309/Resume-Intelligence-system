@@ -1,14 +1,16 @@
 # app/workflows/intelligent_agent.py
-from typing import TypedDict, Annotated, Literal
+from typing import TypedDict, Annotated, Literal, Any
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
+from functools import lru_cache
 import os
 import asyncio
 import shutil
 import json
+import re  
 
 # MCP communication is now handled by app/mcp_infra/executor.py
 # Add new MCP servers in MCP/mcp_config.json - no changes needed here
@@ -19,6 +21,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from querying.hybrid_search import HybridResumeSearch 
+from querying.jd_resume_matcher import rank_resumes_for_jd
 from generation.answer_generation import generate_answer
 import sqlite3
 
@@ -33,6 +36,7 @@ class AgentState(TypedDict):
     sql_filters: dict  # Extracted SQL filters
     vector_query: str  # Reformulated query for vector search
     candidate_ids: list  # Resume IDs from SQL filtering
+    dropped_filters: list  # Filters that were dropped to relax constraints
     search_results: list  # Raw search results
     final_results: list  # Deduplicated and enriched results
     answer: str  # Generated natural language answer
@@ -45,6 +49,9 @@ class AgentState(TypedDict):
     conversation_context: dict  # Candidates from previous conversation (for Q&A queries)
     tool_action: dict   # Populated by MCPRegistry when query matches a registered MCP server
     tool_executed: bool  # Whether the MCP tool was successfully executed
+    selected_jd: dict  # Resolved JD details for JD-resume matching flow
+    jd_match_results: list  # Ranked resume results for JD matching flow
+    jd_info: dict  # Formatted JD information for JD info queries
 
 
 # ============= Query Analysis Models =============
@@ -88,6 +95,8 @@ class QueryAnalysis(BaseModel):
         "contact_based",
         "complex_multi_criteria",
         "email_action",
+        "jd_match",
+        "jd_info",
     ] = Field(description="Primary type of the query")
 
     intent: str = Field(
@@ -138,6 +147,31 @@ class QueryAnalysis(BaseModel):
     is_qa_query: bool = Field(
         description="True if query asks to analyze/explain/suggest based on previous context WITHOUT needing new search (e.g., 'suggest questions based on his resume', 'explain his projects', 'why is he suitable')",
         default=False
+    )
+    
+    is_ambiguous: bool = Field(
+        description="True if the query is ambiguous, assumes facts that might not be in the DB, or lacks enough context to accurately query.",
+        default=False
+    )
+    
+    clarification_needed: str = Field(
+        description="If is_ambiguous is True, this should contain the specific question to ask the user to clarify their intent or assumed facts.",
+        default=""
+    )
+
+    is_jd_match_query: bool = Field(
+        description="True if the query asks to match/rank resumes against a job description",
+        default=False,
+    )
+
+    is_jd_info_query: bool = Field(
+        description="True if the query asks about the job description itself (requirements, skills, details) without matching resumes",
+        default=False,
+    )
+
+    requested_jd_id: str | None = Field(
+        description="Optional jd_id explicitly mentioned in query",
+        default=None,
     )
 
 
@@ -302,6 +336,616 @@ IMPORTANT SEARCH PATTERNS:
 """
 
 
+def _extract_requested_jd_id(query: str) -> str | None:
+    """Extract explicit jd_id token from query when present."""
+    match = re.search(r"\b(?:jd[_\-]?[a-z0-9]+|primary_jd)\b", query.lower())
+    if match:
+        return match.group(0)
+    return None
+
+
+def _detect_jd_match_intent(query: str) -> bool:
+    """Heuristic detector for JD-vs-resume matching intent."""
+    q = query.lower()
+
+    disqualifiers = ["send email", "send invite", "invitation", "email to"]
+    if any(word in q for word in disqualifiers):
+        return False
+
+    jd_context = [
+        "job description",
+        " jd",
+        "jd ",
+        " role requirements",
+    ]
+    match_actions = [
+        "match",
+        "fit",
+        "suitable",
+        "relevant resumes",
+        "best resumes",
+        "rank resumes",
+        "screen resumes",
+        "against jd",
+        "for this role",
+    ]
+
+    has_jd_context = any(token in f" {q} " for token in jd_context)
+    has_match_action = any(token in q for token in match_actions)
+    resume_and_job = ("resume" in q or "candidate" in q) and ("job" in q or "jd" in q)
+
+    return has_match_action and (has_jd_context or resume_and_job)
+
+
+def _detect_jd_info_intent(query: str) -> bool:
+    """Heuristic detector for JD information queries (asking ABOUT the JD, not matching)."""
+    q = query.lower()
+
+    # If it's a JD match query, it's not an info query
+    if _detect_jd_match_intent(query):
+        return False
+
+    # Check for skill audit intent
+    skill_audit_phrases = [
+        "genuine",
+        "inflation",
+        "inflated",
+        "verify skills",
+        "validate skills",
+        "audit skills",
+        "real skills",
+        "fake skills",
+        "actually use"
+    ]
+    if any(phrase in q for phrase in skill_audit_phrases):
+        return False
+
+    # JD context keywords
+    jd_context = [
+        "job description",
+        " jd ",
+        " jd?",
+        "the jd",
+        "this jd",
+        "role requirements",
+        "job requirements",
+        "position requirements",
+    ]
+
+    # Info action keywords (asking about the JD itself)
+    info_actions = [
+        "what skills",
+        "what are the skills",
+        "what does the jd",
+        "tell me about",
+        "show me the jd",
+        "describe the",
+        "what are the requirements",
+        "requirements for",
+        "what is required",
+        "what experience",
+        "looking for",
+        "details about",
+        "details of",
+        "summarize",
+        "summary of",
+    ]
+
+    has_jd_context = any(token in f" {q} " or q.startswith(token.strip()) or q.endswith(token.strip()) for token in jd_context)
+    has_info_action = any(token in q for token in info_actions)
+
+    # Also check for direct JD questions
+    direct_jd_questions = [
+        "what does the jd require",
+        "what skills does the jd",
+        "what is the jd about",
+        "tell me about the jd",
+        "tell me about the job description",
+        "what are the jd requirements",
+    ]
+    is_direct_question = any(phrase in q for phrase in direct_jd_questions)
+
+    return is_direct_question or (has_jd_context and has_info_action)
+
+
+def _has_active_jd_context(chat_history: list[dict[str, Any]], conversation_context: dict[str, Any]) -> bool:
+    """Return True when recent conversation indicates an active JD context."""
+    active_jd = conversation_context.get("active_jd", {}) if isinstance(conversation_context, dict) else {}
+    if isinstance(active_jd, dict) and active_jd.get("jd_id"):
+        return True
+
+    for msg in reversed(chat_history or []):
+        if msg.get("role") != "agent":
+            continue
+
+        query_analysis = msg.get("query_analysis", {}) or {}
+        if query_analysis.get("is_jd_info_query") or query_analysis.get("is_jd_match_query"):
+            return True
+        if query_analysis.get("query_type") in {"jd_info", "jd_match"}:
+            return True
+
+        content = str(msg.get("content", "")).lower()
+        if "job description" in content and "jd id" in content:
+            return True
+
+    return False
+
+
+def _is_jd_followup_query(query: str) -> bool:
+    """Detect short follow-up queries that refer to the current JD without repeating 'JD'."""
+    q = query.lower().strip()
+
+    jd_followup_phrases = [
+        "summarize it",
+        "summarize this",
+        "jd summarize",
+        "1-line summary",
+        "one line summary",
+        "in one line",
+        "give me a 1-line summary",
+        "give me one line summary",
+        "preferred skills",
+        "preferred ones",
+        "nice to have",
+        "must have skills",
+        "must-have skills",
+        "required skills",
+        "mandatory skills",
+        "what is the role",
+        "role of the jd",
+        "role summary",
+        "what does this role",
+        "what skills does",
+        "backend engineer requirement",
+        "backend engineering requirement",
+        "is it mostly backend",
+        "mostly backend",
+        "is it backend",
+        "requirements right",
+        "requirement right",
+        "in the jd",
+        "for the jd",
+        "of the jd",
+        "about the jd",
+        "the jd require",
+        "the jd mention",
+        "the jd have",
+        "this jd require",
+        "this jd mention",
+        "this jd have",
+        # Location follow-ups
+        "where is it located",
+        "where is the role",
+        "where is the job",
+        "what is the location",
+        "what location",
+        "which city",
+        "which location",
+        "is it remote",
+        "is it hybrid",
+        "is it onsite",
+        "is it on-site",
+        "work from home",
+        # Must-have / nice-to-have bare forms
+        "a must have",
+        "a must-have",
+        "a nice to have",
+        "is it must have",
+        "is it required",
+        "is it mandatory",
+        "is it optional",
+        "is it preferred",
+    ]
+
+    if any(phrase in q for phrase in jd_followup_phrases):
+        return True
+
+    if "skills" in q and ("required" in q or "preferred" in q or "must" in q):
+        return True
+
+    if "must have" in q or "must-have" in q:
+        return True
+
+    if "role" in q and any(token in q for token in ["what", "summary", "responsibilit", "basically"]):
+        return True
+
+    # Confirmation patterns: "so it's basically X right?"
+    confirmation_words = ["basically", "right?", "right", "so it's", "so its", "is this", "is it", "correct"]
+    if any(cw in q for cw in confirmation_words):
+        context_words = ["backend", "engineer", "engineering", "requirement", "frontend", "fullstack", "devops", "role", "position"]
+        if any(kw in q for kw in context_words):
+            return True
+
+    return False
+
+
+def _is_affirmative_reply(query: str) -> bool:
+    """Detect very short affirmative replies like yes/sure/okay for continuation flows."""
+    q = (query or "").strip().lower().strip(".?!")
+    if not q:
+        return False
+    affirmative_patterns = [
+        r"^yes\b",
+        r"^yeah\b",
+        r"^yep\b",
+        r"^sure\b",
+        r"^ok\b",
+        r"^okay\b",
+        r"^please\b",
+        r"^go ahead\b",
+        r"^continue\b",
+        r"^do it\b",
+    ]
+    return any(re.match(pattern, q) for pattern in affirmative_patterns)
+
+
+def _classify_jd_info_subintent(query: str) -> str:
+    """Classify JD info query into focused answer intents."""
+    q = query.lower()
+
+    preferred_markers = ["preferred", "nice to have", "good to have", "optional skills"]
+    required_markers = ["must have", "must-have", "required", "mandatory", "essential"]
+    summary_markers = ["summarize", "summary", "brief", "overview"]
+    one_line_summary_markers = ["1-line summary", "one line summary", "in one line"]
+    role_markers = ["role", "position", "what is this role", "role summary", "responsibilities"]
+    confirmation_markers = ["basically", "right?", "right", "so it's", "so its", "is this", "is it", "correct"]
+    location_markers = ["where", "located", "location", "city", "remote", "hybrid", "onsite", "on-site", "work from home"]
+
+    # Natural confirmation queries should receive a short, direct answer.
+    if (
+        ("backend" in q or "requirement" in q or "engineer" in q or "engineering" in q or "frontend" in q or "devops" in q)
+        and any(token in q for token in confirmation_markers)
+    ):
+        return "confirmation"
+
+    if any(token in q for token in one_line_summary_markers):
+        return "one_line_summary"
+
+    # Location queries about the JD itself
+    if any(token in q for token in location_markers):
+        return "location"
+
+    # "is kubernetes a must have?" → asks about a specific skill's classification
+    if ("must have" in q or "must-have" in q) and not any(token in q for token in ["what are", "list", "show"]):
+        return "skill_check"
+
+    if any(token in q for token in summary_markers):
+        return "summary"
+    if any(token in q for token in preferred_markers):
+        return "preferred_skills"
+    if any(token in q for token in required_markers):
+        return "required_skills"
+    if any(token in q for token in role_markers):
+        return "role"
+
+    # Common asks like "what skills does the JD require" should map to must-have skills.
+    if "skills" in q and ("require" in q or "need" in q):
+        return "required_skills"
+
+    return "full"
+
+
+def _normalize_text_list(value: Any) -> list[str]:
+    """Normalize JSON/list/string values into a clean list of strings."""
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    if isinstance(value, str):
+        parsed = None
+        if value.strip().startswith("[") and value.strip().endswith("]"):
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                parsed = None
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        if value.strip():
+            return [value.strip()]
+
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _get_resumes_db_path() -> str:
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "resumes.db"
+    )
+
+
+@lru_cache(maxsize=1)
+def _candidate_name_inventory() -> tuple[str, ...]:
+    """Load distinct candidate names once for heuristic fallback matching."""
+    try:
+        conn = sqlite3.connect(_get_resumes_db_path())
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT DISTINCT candidate_name
+            FROM parsed_resumes
+            WHERE candidate_name IS NOT NULL AND TRIM(candidate_name) <> ''
+            """
+        )
+        names = [row[0].strip() for row in cursor.fetchall() if row and row[0] and row[0].strip()]
+        conn.close()
+        return tuple(sorted(set(names), key=lambda item: (-len(item), item.lower())))
+    except Exception:
+        return tuple()
+
+
+def _extract_names_from_query_fallback(query: str) -> list[str]:
+    """Best-effort name extraction when LLM analysis is unavailable."""
+    query_text = (query or "").strip()
+    query_lower = query_text.lower()
+    matches: list[str] = []
+
+    for candidate_name in _candidate_name_inventory():
+        candidate_lower = candidate_name.lower()
+        if len(candidate_lower) < 4:
+            continue
+        if candidate_lower in query_lower:
+            matches.append(candidate_name)
+
+    if matches:
+        return list(dict.fromkeys(matches))
+
+    regex_patterns = [
+        r"([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,2})'s",
+        r"(?:about|show|what did|tell me about|summary of|experience of|work of|projects of|role of)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,2})",
+    ]
+    banned_suffixes = {"google", "microsoft", "amazon", "python", "java"}
+    for pattern in regex_patterns:
+        for match in re.finditer(pattern, query_text):
+            candidate = " ".join(match.group(1).split())
+            if candidate and candidate.lower() not in banned_suffixes:
+                matches.append(candidate)
+
+    return list(dict.fromkeys(matches))
+
+
+def _extract_company_from_query_fallback(query: str) -> str | None:
+    """Extract company names from common phrases like 'at Google'."""
+    query_text = query or ""
+    company_patterns = [
+        r"\bat\s+([A-Z][A-Za-z0-9&.,\- ]{1,60})",
+        r"\bfrom\s+([A-Z][A-Za-z0-9&.,\- ]{1,60})",
+    ]
+    split_pattern = r"(?:\?|\.|,|\bwith\b|\bwho\b|\bthat\b|\bhaving\b|\bfor\b|\band\b)"
+
+    for pattern in company_patterns:
+        match = re.search(pattern, query_text)
+        if not match:
+            continue
+        raw_value = match.group(1).strip()
+        cleaned = re.split(split_pattern, raw_value, maxsplit=1)[0].strip(" .,'\"")
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _extract_min_experience_fallback(query: str) -> float | None:
+    """Extract simple experience constraints such as '5+ years'."""
+    query_lower = (query or "").lower()
+    patterns = [
+        r"(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?)",
+        r"more than\s+(\d+(?:\.\d+)?)\s*(?:years?|yrs?)",
+        r"(\d+(?:\.\d+)?)\s*(?:or more)\s*(?:years?|yrs?)",
+        r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s+of\s+experience",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _extract_job_title_fallback(query: str) -> str | None:
+    """Detect job-title hints needed for contradiction checks."""
+    query_lower = (query or "").lower()
+    title_patterns = [
+        "junior intern",
+        "junior developer",
+        "junior engineer",
+        "intern",
+        "fresher",
+        "junior",
+        "senior engineer",
+        "senior developer",
+        "senior",
+    ]
+    for title in title_patterns:
+        if title in query_lower:
+            return title
+    return None
+
+
+def _extract_skills_from_query_fallback(query: str) -> list[str]:
+    """Extract a small set of common skills for local fallback routing."""
+    query_lower = (query or "").lower()
+    canonical_skills = [
+        ("machine learning", "Machine Learning"),
+        ("generative ai", "Generative AI"),
+        ("gen ai", "Gen AI"),
+        ("python", "Python"),
+        ("java", "Java"),
+        ("javascript", "JavaScript"),
+        ("react", "React"),
+        ("aws", "AWS"),
+        ("sql", "SQL"),
+    ]
+    found = [label for token, label in canonical_skills if token in query_lower]
+    return list(dict.fromkeys(found))
+
+
+def _is_context_qa_query(query: str, conversation_context: dict[str, Any]) -> bool:
+    """Detect follow-up queries that should use prior candidate context without new search."""
+    if not isinstance(conversation_context, dict):
+        return False
+
+    if not conversation_context.get("candidate_ids"):
+        return False
+
+    query_lower = (query or "").lower()
+    context_markers = [
+        "their",
+        "them",
+        "his",
+        "her",
+        "these",
+        "those",
+        "actual work experiences",
+        "work experiences of",
+        "summarize",
+        "summary of",
+        "projects",
+        "education",
+        "skills",
+        "experience",
+        "why is",
+    ]
+    return any(marker in query_lower for marker in context_markers)
+
+
+def _build_fallback_query_analysis(state: AgentState) -> dict[str, Any]:
+    """Heuristic query analysis used when remote LLM analysis is unavailable."""
+    query = state.get("query", "")
+    query_lower = query.lower()
+    conversation_context = state.get("conversation_context", {}) or {}
+
+    entities = {
+        "names": _extract_names_from_query_fallback(query),
+        "skills": _extract_skills_from_query_fallback(query),
+        "companies": [],
+        "locations": [],
+        "degrees": [],
+        "job_titles": [],
+        "phone": None,
+        "email": None,
+    }
+    filters = {
+        "candidate_ids": [],
+        "min_experience": None,
+        "max_experience": None,
+        "required_skills": [],
+        "location": None,
+        "company": None,
+        "job_title": None,
+        "current_role": None,
+        "phone": None,
+        "email": None,
+        "institute": None,
+        "degree": None,
+        "project_keyword": None,
+    }
+
+    company = _extract_company_from_query_fallback(query)
+    if company:
+        entities["companies"] = [company]
+        filters["company"] = company
+
+    min_experience = _extract_min_experience_fallback(query)
+    if min_experience is not None:
+        filters["min_experience"] = min_experience
+
+    job_title = _extract_job_title_fallback(query)
+    if job_title:
+        entities["job_titles"] = [job_title]
+        filters["job_title"] = job_title
+
+    if entities["skills"]:
+        filters["required_skills"] = entities["skills"]
+
+    is_qa_query = _is_context_qa_query(query, conversation_context)
+    if is_qa_query and conversation_context.get("candidate_ids"):
+        filters["candidate_ids"] = list(conversation_context.get("candidate_ids", []))
+
+    is_aggregation_query = any(token in query_lower for token in ["how many", "count", "average", "avg", "maximum", "minimum"])
+
+    if entities["names"]:
+        query_type = "name_based"
+    elif "project" in query_lower:
+        query_type = "project_based"
+    elif "education" in query_lower or "degree" in query_lower or "college" in query_lower or "university" in query_lower:
+        query_type = "education_based"
+    elif entities["skills"]:
+        query_type = "complex_multi_criteria" if filters["min_experience"] is not None else "skill_based"
+    elif filters["min_experience"] is not None:
+        query_type = "experience_based"
+    else:
+        query_type = "complex_multi_criteria"
+
+    structured_constraints = any(
+        [
+            entities["names"],
+            entities["skills"],
+            entities["companies"],
+            filters["min_experience"] is not None,
+            filters["job_title"],
+            filters["candidate_ids"],
+        ]
+    )
+
+    return {
+        "query_type": query_type,
+        "intent": "answer resume search query using heuristic fallback analysis",
+        "entities": entities,
+        "filters": filters,
+        "search_strategy": "sql_only" if structured_constraints or is_qa_query else "hybrid",
+        "confidence": 0.35,
+        "reasoning": "Heuristic fallback analysis used because remote query analysis was unavailable.",
+        "is_refinement": False,
+        "use_llm_sql": False,
+        "sql_complexity_reason": "Fallback analysis avoids remote SQL generation.",
+        "is_aggregation_query": is_aggregation_query,
+        "is_qa_query": is_qa_query,
+        "is_ambiguous": False,
+        "clarification_needed": "",
+        "is_jd_match_query": False,
+        "is_jd_info_query": False,
+        "requested_jd_id": None,
+    }
+
+
+def _fetch_jd_record(cursor: sqlite3.Cursor, requested_jd_id: str | None) -> dict[str, Any] | None:
+    """Resolve JD using explicit jd_id first, then latest active JD fallback."""
+    if requested_jd_id:
+        cursor.execute(
+            "SELECT * FROM job_descriptions WHERE LOWER(jd_id) = LOWER(?) LIMIT 1",
+            (requested_jd_id,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM job_descriptions
+        WHERE status IS NULL OR LOWER(status) IN ('open', 'active')
+        ORDER BY COALESCE(indexed_at, updated_at, posting_date, '1970-01-01') DESC
+        LIMIT 1
+        """
+    )
+    row = cursor.fetchone()
+    if row:
+        return dict(row)
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM job_descriptions
+        ORDER BY COALESCE(indexed_at, updated_at, posting_date, '1970-01-01') DESC
+        LIMIT 1
+        """
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
 # ============= Initialize LLM =============
 from dotenv import load_dotenv
 
@@ -439,6 +1083,25 @@ def analyze_query_node(state: AgentState) -> AgentState:
             "is_qa_query": False
         }
         return state
+
+    existing_ctx = state.get("conversation_context", {})
+    if not isinstance(existing_ctx, dict):
+        existing_ctx = {}
+
+    # Recover persisted context from the latest agent turn when the caller
+    # only provides session_id and does not manually pass conversation_context.
+    if state["chat_history"]:
+        for msg in reversed(state["chat_history"]):
+            if msg.get("role") != "agent":
+                continue
+            msg_ctx = msg.get("conversation_context")
+            if isinstance(msg_ctx, dict) and msg_ctx:
+                recovered_ctx = dict(msg_ctx)
+                recovered_ctx.update(existing_ctx)
+                state["conversation_context"] = recovered_ctx
+                existing_ctx = recovered_ctx
+                break
+
     chat_context = ""
     previous_candidate_ids = []
     most_recent_candidates = []  # ✅ Track MOST RECENT with names AND IDs
@@ -507,10 +1170,28 @@ def analyze_query_node(state: AgentState) -> AgentState:
     
     # ✅ ALWAYS save conversation context to state for later use
     if most_recent_candidates:
-        existing_ctx = state.get("conversation_context", {})
         existing_ctx["candidate_ids"] = [c["id"] for c in most_recent_candidates]
         existing_ctx["candidate_names"] = [c["name"] for c in most_recent_candidates]
         state["conversation_context"] = existing_ctx
+
+    # Handle pending clarification continuation (e.g., user replies "yes")
+    pending_clarification = existing_ctx.get("pending_clarification", {}) if isinstance(existing_ctx, dict) else {}
+    if pending_clarification and _is_affirmative_reply(state.get("query", "")):
+        pending_ids = pending_clarification.get("candidate_ids", [])
+        pending_names = pending_clarification.get("candidate_names", [])
+        if pending_ids:
+            existing_ctx["candidate_ids"] = pending_ids
+            existing_ctx["candidate_names"] = pending_names
+
+        if pending_names:
+            joined_names = ", ".join(pending_names)
+            state["query"] = f"Please provide a concise summary of the actual work experiences of {joined_names}."
+        else:
+            state["query"] = "Please provide a concise summary of the candidate's actual work experiences."
+
+        existing_ctx.pop("pending_clarification", None)
+        state["conversation_context"] = existing_ctx
+        print("   ↪️ Interpreted confirmation reply as clarification follow-up request")
     
     # ============= QUERY ANALYSIS PROMPT =============
     analysis_prompt = ChatPromptTemplate.from_messages(
@@ -526,6 +1207,7 @@ YOUR TASK
 2. Classify the query type (skill_based, education_based, etc.)
 3. Choose the search strategy (sql_only, vector_first, hybrid)
 4. Decide if LLM-generated SQL is needed (use_llm_sql flag)
+5. Detect ambiguity: if the query assumes facts not present or needs clarification, set `is_ambiguous`=true and provide `clarification_needed`.
 
 ────────────────────────────────
 PRONOUN RESOLUTION
@@ -745,16 +1427,50 @@ These queries use data from PREVIOUS conversation context - NO database search n
             }
         )
 
-        state["query_analysis"] = analysis.model_dump()
+        analysis_data = analysis.model_dump()
+        requested_jd_id = _extract_requested_jd_id(state["query"])
+        jd_intent = _detect_jd_match_intent(state["query"])
+        jd_info_intent = _detect_jd_info_intent(state["query"])
+
+        # Respect model classification when it already identified JD intent.
+        if analysis_data.get("query_type") == "jd_match":
+            jd_intent = True
+        if analysis_data.get("query_type") == "jd_info":
+            jd_info_intent = True
+
+        # Resolve implicit JD follow-ups like "preferred skills?" from session context.
+        has_active_jd = _has_active_jd_context(
+            state.get("chat_history", []),
+            state.get("conversation_context", {}),
+        )
+        if not jd_intent and not jd_info_intent and has_active_jd and _is_jd_followup_query(state["query"]):
+            jd_info_intent = True
+
+        if jd_intent:
+            analysis_data["query_type"] = "jd_match"
+            analysis_data["is_jd_match_query"] = True
+            analysis_data["requested_jd_id"] = requested_jd_id
+        elif jd_info_intent:
+            analysis_data["query_type"] = "jd_info"
+            analysis_data["is_jd_info_query"] = True
+            analysis_data["requested_jd_id"] = requested_jd_id
+
+        state["query_analysis"] = analysis_data
         state["search_strategy"] = analysis.search_strategy
         state["sql_filters"] = analysis.filters.model_dump()
         state["use_llm_sql"] = analysis.use_llm_sql  # Set flag from analysis
-        
+        state["selected_jd"] = {}
+        state["jd_match_results"] = []
+        state["jd_info"] = {}
+
         # ── MCP Tool Action Detection (config-driven via MCPRegistry) ──────────────
+        # Skip MCP matching when JD intent is already resolved (prevents
+        # jd_generator "job description" keyword from hijacking JD info queries).
         state["tool_action"] = {}
         state["tool_executed"] = False
 
-        try:
+        if not jd_intent and not jd_info_intent:
+          try:
             from mcp_infra.registry import MCPRegistry
             registry = MCPRegistry()
 
@@ -781,7 +1497,7 @@ These queries use data from PREVIOUS conversation context - NO database search n
                     "needs_candidate_search": server_cfg.get("needs_candidate_search", False)
                 }
                 print(f"   🔧 Tool action: {server_cfg.get('name', matched_server)}")
-        except Exception as _reg_err:
+          except Exception as _reg_err:
             print(f"   ⚠️  MCPRegistry error: {_reg_err}")
 
         print(f"\n🧠 QUERY ANALYSIS:")
@@ -814,11 +1530,409 @@ These queries use data from PREVIOUS conversation context - NO database search n
             )
 
     except Exception as e:
-        print(f"⚠️  Analysis failed: {e}. Defaulting to hybrid search.")
-        state["query_analysis"] = {"error": str(e)}
-        state["search_strategy"] = "hybrid"
-        state["sql_filters"] = {}
+        print(f"⚠️  Analysis failed: {e}. Falling back to heuristic analysis.")
+        analysis_data = _build_fallback_query_analysis(state)
+        requested_jd_id = _extract_requested_jd_id(state["query"])
+        jd_intent = _detect_jd_match_intent(state["query"])
+        jd_info_intent = _detect_jd_info_intent(state["query"])
+        has_active_jd = _has_active_jd_context(
+            state.get("chat_history", []),
+            state.get("conversation_context", {}),
+        )
+        if not jd_intent and not jd_info_intent and has_active_jd and _is_jd_followup_query(state["query"]):
+            jd_info_intent = True
 
+        if jd_intent:
+            analysis_data["query_type"] = "jd_match"
+            analysis_data["is_jd_match_query"] = True
+            analysis_data["requested_jd_id"] = requested_jd_id
+        elif jd_info_intent:
+            analysis_data["query_type"] = "jd_info"
+            analysis_data["is_jd_info_query"] = True
+            analysis_data["requested_jd_id"] = requested_jd_id
+
+        state["query_analysis"] = analysis_data
+        state["search_strategy"] = analysis_data.get("search_strategy", "sql_only")
+        state["sql_filters"] = analysis_data.get("filters", {})
+        state["use_llm_sql"] = analysis_data.get("use_llm_sql", False)
+        state["selected_jd"] = {}
+        state["jd_match_results"] = []
+        state["jd_info"] = {}
+        state["tool_action"] = {}
+        state["tool_executed"] = False
+
+        if not jd_intent and not jd_info_intent:
+            try:
+                from mcp_infra.registry import MCPRegistry
+
+                registry = MCPRegistry()
+                matched_server = registry.match_intent(state["query"])
+                conversation_context = state.get("conversation_context", {})
+                if not matched_server and conversation_context.get("pending_tool_action"):
+                    matched_server = conversation_context["pending_tool_action"]["server_id"]
+                    print(f"   🔧 Continuing pending tool action: {matched_server}")
+
+                if matched_server:
+                    server_cfg = registry.get_server_config(matched_server)
+                    state["tool_action"] = {
+                        "server_id": matched_server,
+                        "needs_candidate_search": server_cfg.get("needs_candidate_search", False),
+                    }
+                    print(f"   🔧 Tool action: {server_cfg.get('name', matched_server)}")
+            except Exception as _reg_err:
+                print(f"   ⚠️  MCPRegistry error during fallback analysis: {_reg_err}")
+
+    return state
+
+
+def jd_resume_match_node(state: AgentState) -> AgentState:
+    """
+    Node: Match all resumes against a resolved JD using deterministic scoring.
+
+    Resolution order:
+    1. Explicit jd_id in query (if present)
+    2. Latest active/open JD
+    3. Latest JD overall
+    """
+
+    print("\n🎯 EXECUTING JD-RESUME MATCHING...")
+
+    db_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "resumes.db"
+    )
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        analysis = state.get("query_analysis", {})
+        requested_jd_id = analysis.get("requested_jd_id")
+
+        jd_record = _fetch_jd_record(cursor, requested_jd_id)
+        if not jd_record:
+            state["selected_jd"] = {}
+            state["jd_match_results"] = []
+            state["final_results"] = []
+            state["candidate_ids"] = []
+            state["should_retry"] = False
+            state["answer"] = "I couldn't find any indexed job description to match against. Please run JD indexing first."
+            conn.close()
+            return state
+
+        cursor.execute("SELECT * FROM parsed_resumes")
+        resumes = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        if not resumes:
+            state["selected_jd"] = jd_record
+            state["jd_match_results"] = []
+            state["final_results"] = []
+            state["candidate_ids"] = []
+            state["should_retry"] = False
+            state["answer"] = "I couldn't find resumes in the database to compare against the JD."
+            return state
+
+        ranked = rank_resumes_for_jd(jd_record=jd_record, resumes=resumes, top_k=10)
+
+        state["selected_jd"] = jd_record
+        state["jd_match_results"] = ranked
+        state["final_results"] = ranked
+        state["candidate_ids"] = [item.get("resume_id") for item in ranked if item.get("resume_id")]
+        state["should_retry"] = False
+
+        print(f"   ✅ JD resolved: {jd_record.get('job_title', 'Unknown role')} ({jd_record.get('jd_id', 'unknown')})")
+        print(f"   ✅ Ranked {len(ranked)} resumes")
+
+    except Exception as err:
+        state["selected_jd"] = {}
+        state["jd_match_results"] = []
+        state["final_results"] = []
+        state["candidate_ids"] = []
+        state["should_retry"] = False
+        state["answer"] = f"JD matching failed: {err}"
+        print(f"   ❌ JD matching failed: {err}")
+
+    return state
+
+
+def jd_info_node(state: AgentState) -> AgentState:
+    """
+    Node: Fetch and display job description information.
+
+    Handles queries asking ABOUT the JD (requirements, skills, details)
+    without matching resumes.
+    """
+
+    print("\n📋 FETCHING JD INFORMATION...")
+
+    db_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "resumes.db"
+    )
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        analysis = state.get("query_analysis", {})
+        conversation_context = state.get("conversation_context", {})
+        active_jd = conversation_context.get("active_jd", {}) if isinstance(conversation_context, dict) else {}
+        requested_jd_id = analysis.get("requested_jd_id") or active_jd.get("jd_id")
+
+        jd_record = _fetch_jd_record(cursor, requested_jd_id)
+        conn.close()
+
+        if not jd_record:
+            state["selected_jd"] = {}
+            state["jd_match_results"] = []
+            state["final_results"] = []
+            state["candidate_ids"] = []
+            state["should_retry"] = False
+            state["answer"] = "I couldn't find any indexed job description. Please run JD indexing first using scripts/JDindexing.py."
+            return state
+
+        # Parse skills from JSON if stored as string
+        required_skills = jd_record.get("required_skills", "[]")
+        nice_to_have_skills = jd_record.get("nice_to_have_skills", "[]")
+
+        try:
+            if isinstance(required_skills, str):
+                required_skills = json.loads(required_skills)
+            if isinstance(nice_to_have_skills, str):
+                nice_to_have_skills = json.loads(nice_to_have_skills)
+        except json.JSONDecodeError:
+            required_skills = [required_skills] if required_skills else []
+            nice_to_have_skills = [nice_to_have_skills] if nice_to_have_skills else []
+
+        # Build formatted JD info response
+        jd_info = {
+            "jd_id": jd_record.get("jd_id", "unknown"),
+            "job_title": jd_record.get("job_title", "Unknown Role"),
+            "status": jd_record.get("status", "active"),
+            "required_skills": required_skills,
+            "nice_to_have_skills": nice_to_have_skills,
+            "role_summary": jd_record.get("role_summary", ""),
+            "responsibilities": jd_record.get("responsibilities", ""),
+            "company_overview": jd_record.get("company_overview", ""),
+            "location": jd_record.get("location", ""),
+            "job_level": jd_record.get("job_level", ""),
+        }
+
+        state["selected_jd"] = jd_record
+        state["jd_info"] = jd_info
+        state["jd_match_results"] = []
+        state["final_results"] = []
+        state["candidate_ids"] = []
+        state["should_retry"] = False
+
+        existing_ctx = state.get("conversation_context", {})
+        existing_ctx["active_jd"] = jd_info
+        state["conversation_context"] = existing_ctx
+
+        print(f"   ✅ JD found: {jd_info['job_title']} ({jd_info['jd_id']})")
+
+    except Exception as err:
+        state["selected_jd"] = {}
+        state["jd_info"] = {}
+        state["jd_match_results"] = []
+        state["final_results"] = []
+        state["candidate_ids"] = []
+        state["should_retry"] = False
+        state["answer"] = f"Failed to fetch JD information: {err}"
+        print(f"   ❌ JD info fetch failed: {err}")
+
+    return state
+
+
+def validate_assumptions_node(state: AgentState) -> AgentState:
+    """
+    Node: Validates assumptions like entities belonging to the company/role mentioned.
+    If entities do not exist or are ambiguous, marks `is_ambiguous = True` so we can ask the user.
+    """
+    print("\n🔍 VALIDATING ASSUMPTIONS...")
+    
+    analysis = state.get("query_analysis", {})
+    if analysis.get("is_ambiguous"):
+        return state  # Already marked ambiguous by LLM
+
+    # We could do a quick DB check here if names and companies are both provided but don't match,
+    # or if we want to ensure an entity exists at all.
+    # For now, we perform a basic check: if neither candidate IDs, names, skills, nor any other
+    # core filter is found for a search intent, we might consider it ambiguous.
+    
+    # 1. Look for obvious contradictions in the filters:
+    filters = analysis.get("filters", {})
+    job_title = (filters.get("job_title") or "").lower()
+    min_exp = filters.get("min_experience")
+
+    if job_title and min_exp is not None:
+        if ("junior" in job_title or "intern" in job_title or "fresher" in job_title) and min_exp >= 5:
+            analysis["is_ambiguous"] = True
+            analysis["clarification_needed"] = f"You asked for a '{job_title}' but specified {min_exp}+ years of experience. Did you mean a Senior role, or a Junior role with less experience?"
+            state["query_analysis"] = analysis
+            print(f"   ⚠️ Assumptions invalid: Contradictory role/experience ({job_title}, {min_exp} yrs)")
+            return state
+
+    # 2. Check DB for missing entities (Names) and wrong assumed company for a known person
+    entities = analysis.get("entities", {})
+    names = entities.get("names", [])
+    companies = entities.get("companies", [])
+    requested_company = (filters.get("company") or (companies[0] if companies else "") or "").strip()
+
+    def _build_name_where_clause(name: str) -> tuple[str, list[str]]:
+        """Build a robust name matcher using all name tokens with AND logic."""
+        name_parts = [p for p in name.strip().split() if p]
+        if not name_parts:
+            return "candidate_name LIKE ?", [f"%{name}%"]
+        clause = " AND ".join(["candidate_name LIKE ?"] * len(name_parts))
+        params_local = [f"%{part}%" for part in name_parts]
+        return clause, params_local
+
+    def _extract_company_suggestions(work_experience_text: str) -> list[str]:
+        """Extract likely company names from serialized work_experience text."""
+        suggestions: list[str] = []
+        if not work_experience_text:
+            return suggestions
+
+        # Common JSON style: "company": "Samsung"
+        json_companies = re.findall(r'"company"\s*:\s*"([^"]+)"', work_experience_text, flags=re.IGNORECASE)
+        for comp in json_companies:
+            comp_clean = comp.strip()
+            if comp_clean:
+                suggestions.append(comp_clean)
+
+        # Fallback narrative style: "at <Company Name>"
+        text_companies = re.findall(r'\bat\s+([A-Z][A-Za-z0-9&.,\- ]{1,40})', work_experience_text)
+        for comp in text_companies:
+            comp_clean = comp.strip(" .,-")
+            if len(comp_clean) >= 2:
+                suggestions.append(comp_clean)
+
+        # De-duplicate while preserving order
+        unique: list[str] = []
+        seen: set[str] = set()
+        for comp in suggestions:
+            key = comp.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(comp)
+        return unique[:4]
+
+    if names:
+        db_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "resumes.db"
+        )
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            missing_names = []
+            for name in names:
+                name_clause, name_params = _build_name_where_clause(name)
+                cursor.execute(f"SELECT 1 FROM parsed_resumes WHERE {name_clause} LIMIT 1", name_params)
+                if not cursor.fetchone():
+                    missing_names.append(name)
+            conn.close()
+            
+            if missing_names:
+                analysis["is_ambiguous"] = True
+                analysis["clarification_needed"] = f"I couldn't find any candidates named {', '.join(missing_names)} in the database. Could you please check the names or provide more context?"
+                state["query_analysis"] = analysis
+                print(f"   ⚠️ Assumptions invalid: missing names {missing_names}")
+                return state
+
+            # Validate assumption: person + company asked, but company not found in person's experience
+            if requested_company:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+
+                matched_rows: list[tuple[str, str, str, str, float | None]] = []
+                for name in names:
+                    name_clause, name_params = _build_name_where_clause(name)
+                    sql = (
+                        "SELECT resume_id, candidate_name, work_experience, current_role, total_experience_years "
+                        f"FROM parsed_resumes WHERE {name_clause}"
+                    )
+                    cursor.execute(sql, name_params)
+                    matched_rows.extend(cursor.fetchall())
+
+                conn.close()
+
+                requested_company_lower = requested_company.lower()
+                company_matches = []
+                for row in matched_rows:
+                    work_exp = (row[2] or "")
+                    current_role = (row[3] or "")
+                    haystack = f"{work_exp} {current_role}".lower()
+                    if requested_company_lower in haystack:
+                        company_matches.append(row)
+
+                if matched_rows and not company_matches:
+                    candidate_name = matched_rows[0][1] or names[0]
+                    current_role = matched_rows[0][3] or "their current role"
+                    total_exp = matched_rows[0][4]
+
+                    alternatives = _extract_company_suggestions(matched_rows[0][2] or "")
+                    alt_phrase = ""
+                    if alternatives:
+                        if len(alternatives) == 1:
+                            alt_phrase = f" They appear to have worked at {alternatives[0]}."
+                        else:
+                            alt_phrase = f" They appear to have worked at: {', '.join(alternatives)}."
+
+                    summary_part = f"{candidate_name} is currently associated with {current_role}"
+                    if total_exp is not None:
+                        summary_part += f" with about {total_exp} years of experience"
+                    summary_part += "."
+
+                    analysis["is_ambiguous"] = True
+                    analysis["clarification_needed"] = (
+                        f"I couldn't find any record of {candidate_name} working at {requested_company}. "
+                        f"{summary_part}{alt_phrase} "
+                        f"Would you like me to share a summary of their actual work experiences instead?"
+                    )
+                    clarification_ids = [row[0] for row in matched_rows if row and row[0]]
+                    clarification_names = [row[1] for row in matched_rows if row and row[1]]
+                    analysis["clarification_context"] = {
+                        "candidate_ids": list(dict.fromkeys(clarification_ids)),
+                        "candidate_names": list(dict.fromkeys(clarification_names)),
+                    }
+                    state["query_analysis"] = analysis
+                    print(
+                        "   ⚠️ Assumptions invalid: requested company not found for candidate "
+                        f"({candidate_name} vs {requested_company})"
+                    )
+                    return state
+        except Exception as err:
+            print(f"   ⚠️ Could not validate assumptions against DB: {err}")
+            
+    print("   ✅ Assumptions validated.")
+    return state
+
+
+def generate_clarification_node(state: AgentState) -> AgentState:
+    """
+    Node: Uses LLM (or predefined message) to ask a clarifying question.
+    """
+    print("\n❓ GENERATING CLARIFICATION...")
+    analysis = state.get("query_analysis", {})
+    clarification = analysis.get("clarification_needed", "Could you please clarify your request? I found it a bit ambiguous.")
+    clarification_context = analysis.get("clarification_context", {})
+
+    if clarification_context:
+        existing_ctx = state.get("conversation_context", {})
+        existing_ctx["pending_clarification"] = clarification_context
+        state["conversation_context"] = existing_ctx
+    
+    # We could also use an LLM here to refine the clarification question
+    state["answer"] = clarification
+    state["search_results"] = []
+    state["final_results"] = []
+    state["candidate_ids"] = []
+    state["should_retry"] = False
+    
+    print(f"   ✅ Clarification generated: {clarification}")
     return state
 
 
@@ -951,6 +2065,14 @@ def sql_filter_node(state: AgentState) -> AgentState:
         where_clauses.append("total_experience_years <= ?")
         params.append(filters["max_experience"])
 
+    # ✅ Compute should_skip_job_filters BEFORE it is used below
+    tool_action = state.get("tool_action", {})
+    is_tool_action_with_search = bool(tool_action) and tool_action.get("needs_candidate_search", False)
+    should_skip_job_filters = is_tool_action_with_search and has_explicit_names
+
+    if should_skip_job_filters:
+        print(f"   🔧 Tool action with explicit names: Ignoring job/company filters (used for tool content only)")
+
     # Location filter
     # Skip if tool action with explicit names (location may refer to interview venue, not candidate)
     if filters.get("location") and not should_skip_job_filters:
@@ -1047,14 +2169,7 @@ def sql_filter_node(state: AgentState) -> AgentState:
                 if len(skill_groups) > 1:
                     print(f"   🔍 Normal mode: Matching ANY of {len(skill_groups)} skills (OR logic)")
 
-    # ✅ For tool actions that need candidate search (e.g., email), skip job/company filters
-    # Those filters would narrow candidates unintentionally - they're for tool CONTENT, not search
-    tool_action = state.get("tool_action", {})
-    is_tool_action_with_search = bool(tool_action) and tool_action.get("needs_candidate_search", False)
-    should_skip_job_filters = is_tool_action_with_search and has_explicit_names
-
-    if should_skip_job_filters:
-        print(f"   🔧 Tool action with explicit names: Ignoring job/company filters (used for tool content only)")
+    # (should_skip_job_filters was already computed above, before the location filter)
 
     # Job title filter (searches in work_experience JSON and current_role)
     # Skip if email action with explicit names
@@ -1153,12 +2268,112 @@ def sql_filter_node(state: AgentState) -> AgentState:
 
     cursor.execute(sql, params)
     results = cursor.fetchall()
+
+    # --- GRACEFUL FILTER RELAXATION ---
+    dropped_filters = []
+    if not results and where_clauses:
+        print("   ⚠️ Zero results found with strict SQL filters. Attempting graceful filter relaxation...")
+        
+        # Define optional filters that might over-constrain the query
+        filters_to_try_dropping = ["location", "company", "institute", "degree", "max_experience", "min_experience", "project_keyword", "job_title", "current_role"]
+        
+        # Identify which constraints are actually present in the query
+        active_filters = {k: v for k, v in filters.items() if v}
+        for filter_key in filters_to_try_dropping:
+            if filter_key in active_filters:
+                dropped_filters.append(filter_key)
+                print(f"   🔄 Relaxing filter constraint: '{filter_key}'")
+
+        if dropped_filters:
+            # Rebuild query using ONLY names, candidate_ids, and skills
+            relaxed_clauses = []
+            relaxed_params = []
+
+            # 1. Candidate IDs
+            if filters.get("candidate_ids") and not has_explicit_names:
+                candidate_id_list = filters["candidate_ids"]
+                placeholders = ",".join("?" * len(candidate_id_list))
+                relaxed_clauses.append(f"resume_id IN ({placeholders})")
+                relaxed_params.extend(candidate_id_list)
+
+            # 2. Names
+            if has_explicit_names:
+                names = entities["names"]
+                if len(names) > 1:
+                    name_or_conditions = []
+                    for name in names:
+                        name_parts = name.strip().split()
+                        if len(name_parts) >= 2:
+                            name_and_parts = ["candidate_name LIKE ?"] * len(name_parts)
+                            for part in name_parts:
+                                relaxed_params.append(f"%{part}%")
+                            name_or_conditions.append(f"({' AND '.join(name_and_parts)})")
+                        else:
+                            name_or_conditions.append("candidate_name LIKE ?")
+                            relaxed_params.append(f"%{name}%")
+                    relaxed_clauses.append(f"({' OR '.join(name_or_conditions)})")
+                else:
+                    name = names[0]
+                    name_parts = name.strip().split()
+                    if len(name_parts) >= 2:
+                        name_conditions = ["candidate_name LIKE ?"] * len(name_parts)
+                        for part in name_parts:
+                            relaxed_params.append(f"%{part}%")
+                        relaxed_clauses.append(f"({' AND '.join(name_conditions)})")
+                    else:
+                        relaxed_clauses.append("candidate_name LIKE ?")
+                        relaxed_params.append(f"%{name}%")
+
+            # 3. Skills
+            if filters.get("required_skills"):
+                skill_groups_relaxed = []
+                for skill in filters["required_skills"]:
+                    skill_lower = skill.lower().strip()
+                    skill_conditions = []
+                    if skill_lower in skill_expansions:
+                        variations = skill_expansions[skill_lower]
+                        for variation in variations:
+                            skill_conditions.append("skills LIKE ?")
+                            relaxed_params.append(f"%{variation}%")
+                    else:
+                        skill_conditions.append("skills LIKE ?")
+                        relaxed_params.append(f"%{skill}%")
+                    if skill_conditions:
+                        skill_groups_relaxed.append(f"({' OR '.join(skill_conditions)})")
+
+                if skill_groups_relaxed:
+                    if is_context_filter and len(skill_groups_relaxed) > 1:
+                        relaxed_clauses.append(f"({' AND '.join(skill_groups_relaxed)})")
+                    else:
+                        relaxed_clauses.append(f"({' OR '.join(skill_groups_relaxed)})")
+
+            # Execute relaxed query
+            sql_relaxed = "SELECT resume_id FROM parsed_resumes"
+            if relaxed_clauses:
+                sql_relaxed += " WHERE " + " AND ".join(relaxed_clauses)
+            else:
+                # If no clauses are left (e.g., query was purely "Google employees"), fetch all or handle gracefully
+                # We'll fetch all and let the LLM handle the "no specific names/skills" aspect
+                pass
+
+            print(f"   RELAXED SQL: {sql_relaxed}")
+            print(f"   RELAXED Params: {relaxed_params}")
+
+            cursor.execute(sql_relaxed, relaxed_params)
+            results = cursor.fetchall()
+
+            if results:
+                print(f"   ✅ Recovered {len(results)} candidates after dropping filters: {', '.join(dropped_filters)}")
+            else:
+                print("   ❌ Still zero results after filter relaxation.")
+
     conn.close()
 
     candidate_ids = [row[0] for row in results]
     state["candidate_ids"] = candidate_ids
+    state["dropped_filters"] = dropped_filters
 
-    print(f"   ✅ Found {len(candidate_ids)} candidates via SQL")
+    print(f"   ✅ Final: Found {len(candidate_ids)} candidates via SQL")
 
     # If no results and this was a sql_only query, mark for LLM SQL retry
     if not candidate_ids and state["search_strategy"] == "sql_only":
@@ -1352,26 +2567,39 @@ def vector_search_node(state: AgentState) -> AgentState:
     print("\n🔍 EXECUTING VECTOR SEARCH...")
     print(f"   Strategy: {state['search_strategy']} - Using semantic ranking")
 
-    # Use vector store directly (not HybridResumeSearch) to apply ChromaDB filters correctly
-    from vectorstore.chroma_store import ResumeVectorStore
+    try:
+        # Use vector store directly (not HybridResumeSearch) to apply ChromaDB filters correctly
+        from vectorstore.chroma_store import ResumeVectorStore
 
-    vector_store = ResumeVectorStore()
+        vector_store = ResumeVectorStore()
 
-    # Prepare metadata filter if we have candidate IDs from SQL (hybrid strategy)
-    vector_filters = None
-    if state["candidate_ids"]:
-        vector_filters = {"resume_id": {"$in": state["candidate_ids"]}}
-        print(f"   🎯 Filtering to {len(state['candidate_ids'])} candidates from SQL")
-        print(f"   ⚠️  Note: Will return top 10 most relevant (not all {len(state['candidate_ids'])})")
+        # Prepare metadata filter if we have candidate IDs from SQL (hybrid strategy)
+        vector_filters = None
+        if state["candidate_ids"]:
+            vector_filters = {"resume_id": {"$in": state["candidate_ids"]}}
+            print(f"   🎯 Filtering to {len(state['candidate_ids'])} candidates from SQL")
+            print(f"   ⚠️  Note: Will return top 10 most relevant (not all {len(state['candidate_ids'])})")
 
-    # Execute search directly on vector store with proper filter format
-    results = vector_store.search(
-        query=state["vector_query"], top_k=10, filters=vector_filters
-    )
+        # Execute search directly on vector store with proper filter format
+        results = vector_store.search(
+            query=state["vector_query"], top_k=10, filters=vector_filters
+        )
 
-    state["search_results"] = results
+        state["search_results"] = results
 
-    print(f"   ✅ Found {len(results.get('ids', [[]])[0])} vector matches")
+        print(f"   ✅ Found {len(results.get('ids', [[]])[0])} vector matches")
+    except Exception as err:
+        print(f"   ⚠️  Vector search unavailable: {err}")
+        if state.get("candidate_ids"):
+            print("   ↪️ Falling back to SQL-derived candidate set without vector ranking")
+            state["search_results"] = {
+                "ids": [[f"{rid}__direct" for rid in state["candidate_ids"]]],
+                "metadatas": [[{"resume_id": rid} for rid in state["candidate_ids"]]],
+                "documents": [["" for _ in state["candidate_ids"]]],
+                "distances": [[0.0 for _ in state["candidate_ids"]]],
+            }
+        else:
+            state["search_results"] = {}
 
     return state
 
@@ -1898,6 +3126,253 @@ def generate_answer_node(state: AgentState) -> AgentState:
     if analysis.get("query_type") == "greeting":
         state["answer"] = "Hello! I'm here to help you with your resume-related queries."
         return state
+
+    if analysis.get("is_jd_match_query", False) or analysis.get("query_type") == "jd_match":
+        jd_info = state.get("selected_jd", {})
+        ranked = state.get("jd_match_results", [])
+
+        if not jd_info:
+            state["answer"] = "I couldn't resolve a job description for matching."
+            return state
+
+        if not ranked:
+            state["answer"] = "No resume matches were found for the selected JD."
+            return state
+
+        lines = [
+            f"Top {len(ranked)} resume matches for **{jd_info.get('job_title', 'Selected JD')}** (JD: {jd_info.get('jd_id', 'unknown')})",
+            "",
+        ]
+
+        for idx, candidate in enumerate(ranked, 1):
+            name = candidate.get("candidate_name") or "Unknown candidate"
+            score = candidate.get("match_percentage", 0)
+            fit = candidate.get("fit_label", "Fit not classified")
+            exp = candidate.get("total_experience_years")
+            reasons = candidate.get("match_reasons") or []
+            reason_text = "; ".join(reasons[:2]) if reasons else "No detailed reason generated"
+
+            lines.append(
+                f"{idx}. {name} | Score: {score}% | {fit} | Experience: {exp if exp is not None else 'N/A'} years"
+            )
+            lines.append(f"   Reason: {reason_text}")
+
+        state["answer"] = "\n".join(lines)
+        print(f"   ✅ JD match answer generated with {len(ranked)} ranked candidates")
+        return state
+
+    # Handle JD Info queries - show JD details
+    if analysis.get("is_jd_info_query", False) or analysis.get("query_type") == "jd_info":
+        jd_info = state.get("jd_info", {})
+        if not jd_info:
+            jd_info = state.get("conversation_context", {}).get("active_jd", {})
+
+        if not jd_info:
+            state["answer"] = "I couldn't find any job description information."
+            return state
+
+        subintent = _classify_jd_info_subintent(state.get("query", ""))
+
+        required = _normalize_text_list(jd_info.get("required_skills", []))
+        nice_to_have = _normalize_text_list(jd_info.get("nice_to_have_skills", []))
+        responsibilities = _normalize_text_list(jd_info.get("responsibilities", []))
+        role_summary = str(jd_info.get("role_summary", "")).strip()
+
+        if subintent == "required_skills":
+            if required:
+                lines = [
+                    f"Must-have skills for **{jd_info.get('job_title', 'this JD')}**:",
+                    *[f"- {skill}" for skill in required],
+                ]
+                state["answer"] = "\n".join(lines)
+            else:
+                state["answer"] = "I couldn't find explicit must-have skills in this JD."
+            print("   ✅ JD required-skills answer generated")
+            return state
+
+        if subintent == "preferred_skills":
+            if nice_to_have:
+                lines = [
+                    f"Preferred (nice-to-have) skills for **{jd_info.get('job_title', 'this JD')}**:",
+                    *[f"- {skill}" for skill in nice_to_have],
+                ]
+                state["answer"] = "\n".join(lines)
+            else:
+                state["answer"] = "This JD does not list any preferred/nice-to-have skills."
+            print("   ✅ JD preferred-skills answer generated")
+            return state
+
+        if subintent == "role":
+            lines = [
+                f"Role: **{jd_info.get('job_title', 'Unknown Role')}**",
+            ]
+            if role_summary:
+                lines.extend(["", role_summary])
+            if responsibilities:
+                lines.extend(["", "Key responsibilities:"])
+                lines.extend([f"- {item}" for item in responsibilities[:6]])
+            state["answer"] = "\n".join(lines)
+            print("   ✅ JD role answer generated")
+            return state
+
+        if subintent == "summary" or subintent == "full":
+            from langchain_core.messages import SystemMessage, HumanMessage
+            import json
+            
+            jd_json = json.dumps(jd_info, indent=2)
+            
+            summary_prompt = [
+                SystemMessage(content=(
+                    "You are a helpful HR assistant. "
+                    "Provide a helpful answer about the job description based strictly on the provided JD data. "
+                    "Follow the user's formatting constraints (e.g., 'in 5 bullet points'). "
+                    "Do NOT invent details not found in the JD."
+                )),
+                HumanMessage(content=(
+                    f"User Query: {state['query']}\n\n"
+                    f"JD Data:\n{jd_json}"
+                ))
+            ]
+            
+            try:
+                response = answer_llm.invoke(summary_prompt)
+                state["answer"] = response.content
+                print("   ✅ JD LLM-generated answer created")
+                return state
+            except Exception as e:
+                print(f"   ⚠️  LLM JD summary failed: {e}. Falling back to default format.")
+                
+            # Fallback to default summary if LLM fails
+            lines = [
+                f"JD Summary: **{jd_info.get('job_title', 'Unknown Role')}**",
+            ]
+            if jd_info.get("location"):
+                lines.append(f"Location: {jd_info['location']}")
+            if role_summary:
+                lines.extend(["", role_summary])
+            if required:
+                lines.extend(["", "Must-have skills:"])
+                lines.extend([f"- {skill}" for skill in required])
+            if nice_to_have:
+                lines.extend(["", "Preferred skills:"])
+                lines.extend([f"- {skill}" for skill in nice_to_have])
+            if responsibilities:
+                lines.extend(["", "Top responsibilities:"])
+                lines.extend([f"- {item}" for item in responsibilities[:3]])
+            state["answer"] = "\n".join(lines)
+            print("   ✅ JD summary answer generated (fallback)")
+            return state
+
+        if subintent == "one_line_summary":
+            core_skills = ", ".join(required[:3]) if required else "core backend skills"
+            location = jd_info.get("location")
+            location_text = f" in {location}" if location else ""
+            state["answer"] = (
+                f"{jd_info.get('job_title', 'This role')} is a backend API role{location_text} focused on {core_skills}."
+            )
+            print("   ✅ JD one-line summary answer generated")
+            return state
+
+        if subintent == "confirmation":
+            role_name = jd_info.get("job_title", "this role")
+            must_have_preview = ", ".join(required[:3]) if required else "core backend skills"
+            state["answer"] = (
+                f"Yes. It is primarily a **{role_name}** requirement focused on {must_have_preview}."
+            )
+            print("   ✅ JD confirmation answer generated")
+            return state
+
+        if subintent == "location":
+            location = jd_info.get("location", "")
+            role_name = jd_info.get("job_title", "this role")
+            if location:
+                state["answer"] = f"The **{role_name}** position is located in **{location}**."
+            else:
+                state["answer"] = f"No specific location is listed for **{role_name}**."
+            print("   ✅ JD location answer generated")
+            return state
+
+        if subintent == "skill_check":
+            # Extract the skill being asked about from the query
+            user_query = state.get("query", "").lower()
+            # Check against both required and nice-to-have lists
+            asked_skill = None
+            for skill in required + nice_to_have:
+                if skill.lower() in user_query:
+                    asked_skill = skill
+                    break
+
+            if asked_skill:
+                is_required = any(asked_skill.lower() == s.lower() for s in required)
+                is_nice = any(asked_skill.lower() == s.lower() for s in nice_to_have)
+                if is_required:
+                    state["answer"] = f"Yes, **{asked_skill}** is a **must-have** (required) skill for this role."
+                elif is_nice:
+                    state["answer"] = f"No, **{asked_skill}** is listed as a **nice-to-have** (preferred) skill, not a must-have."
+                else:
+                    state["answer"] = f"**{asked_skill}** is not explicitly listed in the JD requirements."
+            else:
+                state["answer"] = (
+                    f"Must-have skills: {', '.join(required[:5]) if required else 'none listed'}.\n"
+                    f"Nice-to-have skills: {', '.join(nice_to_have[:5]) if nice_to_have else 'none listed'}."
+                )
+            print("   ✅ JD skill-check answer generated")
+            return state
+
+        # Build formatted JD info response
+        lines = [
+            f"## 📋 Job Description: {jd_info.get('job_title', 'Unknown Role')}",
+            f"**JD ID:** {jd_info.get('jd_id', 'unknown')}",
+            f"**Status:** {jd_info.get('status', 'active')}",
+            "",
+        ]
+
+        if jd_info.get("job_level"):
+            lines.append(f"**Level:** {jd_info['job_level']}")
+        if jd_info.get("location"):
+            lines.append(f"**Location:** {jd_info['location']}")
+
+        lines.append("")
+
+        # Required Skills
+        required = _normalize_text_list(jd_info.get("required_skills", []))
+        if required:
+            lines.append("### Required Skills")
+            for skill in required:
+                lines.append(f"- {skill}")
+            lines.append("")
+
+        # Nice-to-have Skills
+        nice_to_have = _normalize_text_list(jd_info.get("nice_to_have_skills", []))
+        if nice_to_have:
+            lines.append("### Nice-to-Have Skills")
+            for skill in nice_to_have:
+                lines.append(f"- {skill}")
+            lines.append("")
+
+        # Role Summary
+        if jd_info.get("role_summary"):
+            lines.append("### Role Summary")
+            lines.append(jd_info["role_summary"])
+            lines.append("")
+
+        # Responsibilities
+        if responsibilities:
+            lines.append("### Responsibilities")
+            for resp_item in responsibilities:
+                lines.append(f"- {resp_item}")
+            lines.append("")
+
+        # Company Overview
+        if jd_info.get("company_overview"):
+            lines.append("### Company Overview")
+            lines.append(jd_info["company_overview"])
+            lines.append("")
+
+        state["answer"] = "\n".join(lines)
+        print(f"   ✅ JD info answer generated for {jd_info.get('job_title', 'Unknown')}")
+        return state
+
     if analysis.get("is_aggregation_query", False):
         aggregation_result = state.get("aggregation_result", 0)
         query_lower = state["query"].lower()
@@ -2047,7 +3522,11 @@ def generate_answer_node(state: AgentState) -> AgentState:
                 print(f"   📋 Found {len(name_matches)} candidates matching '{specified_name}' - showing all")
     
     answer = generate_answer(
-        query=state["query"], search_results=results_to_use, format_as_list=format_as_list
+        query=state["query"], 
+        search_results=results_to_use, 
+        conversation_history=state.get("chat_history", []),
+        format_as_list=format_as_list, 
+        dropped_filters=state.get("dropped_filters", [])
     )
 
     state["answer"] = answer
@@ -2096,6 +3575,10 @@ def create_intelligent_agent() -> StateGraph:
 
     # Add nodes
     workflow.add_node("analyze_query", analyze_query_node)
+    workflow.add_node("validate_assumptions", validate_assumptions_node)  # NEW
+    workflow.add_node("generate_clarification", generate_clarification_node)  # NEW
+    workflow.add_node("jd_resume_match", jd_resume_match_node)
+    workflow.add_node("jd_info", jd_info_node)
     workflow.add_node("sql_filter", sql_filter_node)
     workflow.add_node("llm_sql_generation", llm_sql_generation_node)  # NEW
     workflow.add_node("vector_search", vector_search_node)
@@ -2105,15 +3588,37 @@ def create_intelligent_agent() -> StateGraph:
     workflow.add_node("generate_answer", generate_answer_node)
 
     # Define edges
+    # analyzer -> validate_assumptions first
     workflow.set_entry_point("analyze_query")
+    workflow.add_edge("analyze_query", "validate_assumptions")
+
+    # Routing out of validate_assumptions
+    def route_after_validation(state: AgentState) -> Literal["generate_clarification", "route_to_next"]:
+        """Route to clarification if ambiguous, else proceed"""
+        analysis = state.get("query_analysis", {})
+        if analysis.get("is_ambiguous", False) or analysis.get("clarification_needed"):
+            return "generate_clarification"
+        return "route_to_next"
+        
+    workflow.add_conditional_edges(
+        "validate_assumptions",
+        route_after_validation,
+        {
+            "generate_clarification": "generate_clarification",
+            "route_to_next": "route_to_next_jump" # Virtual node to run the rest of logic
+        }
+    )
+
+    # Need a dummy node to jump off
+    def dummy_route_node(state: AgentState) -> AgentState:
+        return state
     
-    # Add conditional routing after analysis
-    # - If follow-up question about last tool response → generate answer directly
-    # - If tool action that needs candidates → search first, then execute tool
-    # - If tool action without candidate search → skip search, execute tool directly
-    # - If Q&A query → fetch candidates from context, then generate answer
-    # - Otherwise → proceed to SQL filtering
-    def route_after_analysis(state: AgentState) -> Literal["sql_filter", "fetch_context_candidates", "execute_mcp_tool", "generate_answer"]:
+    workflow.add_node("route_to_next_jump", dummy_route_node)
+    
+    # After clarification, end or generate answer
+    workflow.add_edge("generate_clarification", END)
+
+    def route_after_analysis(state: AgentState) -> Literal["jd_resume_match", "jd_info", "sql_filter", "fetch_context_candidates", "execute_mcp_tool", "generate_answer"]:
         """Route based on query type"""
         import re as _re
         conversation_context = state.get("conversation_context", {})
@@ -2124,6 +3629,16 @@ def create_intelligent_agent() -> StateGraph:
         if last_tool and not tool_action:
             print("   💬 Detected follow-up question about previous tool response")
             return "generate_answer"
+
+        analysis = state.get("query_analysis", {})
+
+        # JD matching query (rank resumes against JD)
+        if analysis.get("is_jd_match_query", False):
+            return "jd_resume_match"
+
+        # JD info query (asking about the JD itself)
+        if analysis.get("is_jd_info_query", False) or analysis.get("query_type") == "jd_info":
+            return "jd_info"
 
         if tool_action:
             needs_search = tool_action.get("needs_candidate_search", False)
@@ -2148,22 +3663,26 @@ def create_intelligent_agent() -> StateGraph:
                 return "execute_mcp_tool"
 
         # Q&A query: use context
-        analysis = state.get("query_analysis", {})
         if analysis.get("is_qa_query", False):
             return "fetch_context_candidates"
 
         return "sql_filter"
     
     workflow.add_conditional_edges(
-        "analyze_query",
+        "route_to_next_jump",
         route_after_analysis,
         {
+            "jd_resume_match": "jd_resume_match",
+            "jd_info": "jd_info",
             "sql_filter": "sql_filter",
             "fetch_context_candidates": "fetch_context_candidates",
             "execute_mcp_tool": "execute_mcp_tool",
             "generate_answer": "generate_answer"
         }
     )
+
+    workflow.add_edge("jd_resume_match", "generate_answer")
+    workflow.add_edge("jd_info", "generate_answer")
     
     # Q&A queries: fetch context → generate answer
     workflow.add_edge("fetch_context_candidates", "generate_answer")
@@ -2288,6 +3807,10 @@ class ResumeIntelligenceAgent:
             "aggregation_result": 0,
             "chat_history": chat_history,  # ✅ Load from database
             "conversation_context": conversation_context or {},  # ✅ Persist across turns
+            "tool_action": {},
+            "tool_executed": False,
+            "selected_jd": {},
+            "jd_match_results": [],
         }
 
         # Run the graph
@@ -2298,6 +3821,16 @@ class ResumeIntelligenceAgent:
         final_results = final_state.get("final_results", [])
         candidate_ids = [result.get("resume_id") for result in final_results]
         candidate_names = [result.get("candidate_name") for result in final_results]  # ✅ NEW
+        conversation_context = final_state.get("conversation_context", {})
+
+        # Clarification turns often do not populate final_results, but we still
+        # want the candidate context persisted with the session for the next turn.
+        if not candidate_ids and isinstance(conversation_context, dict):
+            pending = conversation_context.get("pending_clarification", {})
+            if isinstance(pending, dict):
+                candidate_ids = pending.get("candidate_ids", []) or conversation_context.get("candidate_ids", [])
+                candidate_names = pending.get("candidate_names", []) or conversation_context.get("candidate_names", [])
+
         query_analysis = final_state.get("query_analysis", {})
         search_strategy = final_state.get("search_strategy", "unknown")
 
@@ -2309,6 +3842,7 @@ class ResumeIntelligenceAgent:
             candidate_names=candidate_names,  # ✅ NEW
             search_type=search_strategy,
             query_analysis=query_analysis,
+            conversation_context=conversation_context,
         )
 
         if verbose:
@@ -2326,7 +3860,8 @@ class ResumeIntelligenceAgent:
             "answer": answer,
             "session_id": session_id,
             "candidate_ids": candidate_ids,
-            "conversation_context": final_state.get("conversation_context", {}),
+            "conversation_context": conversation_context,
+            "query_analysis": query_analysis,  # Exposed for interactive/debug scripts
         }
 
 

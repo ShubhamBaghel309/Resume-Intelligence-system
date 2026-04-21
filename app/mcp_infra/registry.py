@@ -46,11 +46,19 @@ class MCPRegistry:
         """
         Check query against all registered server trigger keywords.
         Returns the matching server_id, or None if no server matches.
+
+        If a server config sets "require_digit": true, the query must
+        also contain at least one digit for the keyword match to count
+        (prevents bare "add"/"multiply" from matching non-arithmetic queries).
         """
+        import re
         query_lower = query.lower()
         for server_id, config in self._config["servers"].items():
+            needs_digit = config.get("require_digit", False)
             for keyword in config.get("trigger_keywords", []):
                 if keyword.lower() in query_lower:
+                    if needs_digit and not re.search(r"\d", query_lower):
+                        continue  # keyword matched but no number in query
                     return server_id
         return None
 

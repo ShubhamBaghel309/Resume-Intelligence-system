@@ -104,6 +104,44 @@ def init_db():
     )
 """)
 
+    # JD Raw Documents Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS jd_documents (
+        document_id TEXT PRIMARY KEY,
+        jd_id TEXT,
+        original_filename TEXT,
+        source_path TEXT,
+        raw_text TEXT,
+        status TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Parsed/Structured Job Descriptions Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS job_descriptions (
+        jd_id TEXT PRIMARY KEY,
+        document_id TEXT,
+        job_title TEXT,
+        job_level TEXT,
+        department TEXT,
+        location TEXT,
+        role_summary TEXT,
+        company_overview TEXT,
+        responsibilities TEXT,
+        required_skills TEXT,
+        nice_to_have_skills TEXT,
+        benefits TEXT,
+        salary_range TEXT,
+        posting_date TEXT,
+        status TEXT,
+        original_text TEXT,
+        indexed_at TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (document_id) REFERENCES jd_documents(document_id)
+    )
+    """)
+
 
     conn.commit()
     conn.close()
