@@ -3851,10 +3851,6 @@ class ResumeIntelligenceAgent:
             print("=" * 70)
             print(answer)
             print("=" * 70)
-            print(f"💾 Saved to session: {session_id}")
-            if candidate_ids:
-                print(f"👥 Returned {len(candidate_ids)} candidates")
-            print("=" * 70)
 
         return {
             "answer": answer,

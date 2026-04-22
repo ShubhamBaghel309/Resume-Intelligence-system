@@ -435,15 +435,6 @@ async def main_async():
                 print(f"\n📋 JD Route: {route_label} | Sub-intent: {subintent} | Active JD: {active_jd_id}")
 
             # ── Context Status Line ────────────────────────────────────────────
-            active_jd_title = active_jd.get('job_title', '') if active_jd else ''
-            ctx_parts = []
-            if active_jd_title:
-                ctx_parts.append(f"active_jd={active_jd_title}")
-            if session_id:
-                ctx_parts.append(f"session={session_id[:8]}...")
-            if ctx_parts:
-                print(f"🔗 Context: {' | '.join(ctx_parts)}")
-
             # Log to file only (verbose mode already printed everything to console)
             logger.log_file.write(f"[{datetime.now().strftime('%H:%M:%S')}] QUERY: {query}\n")
             logger.log_file.write(f"[{datetime.now().strftime('%H:%M:%S')}] SESSION: {session_id}, CANDIDATES: {len(result.get('candidate_ids', []))}\n\n")
