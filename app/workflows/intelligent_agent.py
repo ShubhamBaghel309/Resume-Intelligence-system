@@ -579,6 +579,43 @@ def _is_affirmative_reply(query: str) -> bool:
     return any(re.match(pattern, q) for pattern in affirmative_patterns)
 
 
+def _is_negative_reply(query: str) -> bool:
+    """Detect short negative replies that should cancel pending clarification."""
+    q = (query or "").strip().lower().strip(".?!")
+    if not q:
+        return False
+    negative_patterns = [
+        r"^no\b",
+        r"^nope\b",
+        r"^nah\b",
+        r"^not now\b",
+        r"^no thanks\b",
+        r"^don't\b",
+        r"^do not\b",
+        r"^stop\b",
+        r"^cancel\b",
+        r"^leave it\b",
+        r"^skip it\b",
+    ]
+    return any(re.match(pattern, q) for pattern in negative_patterns)
+
+
+def _strip_leading_reply_token(query: str) -> str:
+    """Remove leading yes/no-style conversational prefixes and keep the actual ask."""
+    q = (query or "").strip()
+    if not q:
+        return ""
+
+    patterns = [
+        r"^\s*(?:yes|yeah|yep|sure|ok|okay|please|go ahead|continue|do it)\b[\s,:-]*",
+        r"^\s*(?:no|nope|nah|no thanks|not now|stop|cancel|leave it|skip it)\b[\s,:-]*",
+    ]
+    stripped = q
+    for pattern in patterns:
+        stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE)
+    return stripped.strip()
+
+
 def _classify_jd_info_subintent(query: str) -> str:
     """Classify JD info query into focused answer intents."""
     q = query.lower()
@@ -708,13 +745,13 @@ def _extract_company_from_query_fallback(query: str) -> str | None:
     """Extract company names from common phrases like 'at Google'."""
     query_text = query or ""
     company_patterns = [
-        r"\bat\s+([A-Z][A-Za-z0-9&.,\- ]{1,60})",
-        r"\bfrom\s+([A-Z][A-Za-z0-9&.,\- ]{1,60})",
+        r"\bat\s+([A-Za-z][A-Za-z0-9&.,\- ]{1,60})",
+        r"\bfrom\s+([A-Za-z][A-Za-z0-9&.,\- ]{1,60})",
     ]
     split_pattern = r"(?:\?|\.|,|\bwith\b|\bwho\b|\bthat\b|\bhaving\b|\bfor\b|\band\b)"
 
     for pattern in company_patterns:
-        match = re.search(pattern, query_text)
+        match = re.search(pattern, query_text, flags=re.IGNORECASE)
         if not match:
             continue
         raw_value = match.group(1).strip()
@@ -1183,7 +1220,10 @@ def analyze_query_node(state: AgentState) -> AgentState:
             existing_ctx["candidate_ids"] = pending_ids
             existing_ctx["candidate_names"] = pending_names
 
-        if pending_names:
+        followup_query = _strip_leading_reply_token(state.get("query", ""))
+        if followup_query:
+            state["query"] = followup_query
+        elif pending_names:
             joined_names = ", ".join(pending_names)
             state["query"] = f"Please provide a concise summary of the actual work experiences of {joined_names}."
         else:
@@ -1192,6 +1232,35 @@ def analyze_query_node(state: AgentState) -> AgentState:
         existing_ctx.pop("pending_clarification", None)
         state["conversation_context"] = existing_ctx
         print("   ↪️ Interpreted confirmation reply as clarification follow-up request")
+    elif pending_clarification and _is_negative_reply(state.get("query", "")):
+        existing_ctx.pop("pending_clarification", None)
+        existing_ctx.pop("candidate_ids", None)
+        existing_ctx.pop("candidate_names", None)
+        state["conversation_context"] = existing_ctx
+        state["query_analysis"] = {
+            "query_type": "clarification_declined",
+            "intent": "stop the pending clarification flow",
+            "entities": {},
+            "filters": {},
+            "search_strategy": "sql_only",
+            "confidence": 1.0,
+            "reasoning": "User declined the clarification follow-up.",
+            "is_refinement": False,
+            "use_llm_sql": False,
+            "sql_complexity_reason": "",
+            "is_aggregation_query": False,
+            "is_qa_query": False,
+            "is_ambiguous": False,
+            "clarification_needed": "",
+            "is_jd_match_query": False,
+            "is_jd_info_query": False,
+            "requested_jd_id": None,
+        }
+        state["search_strategy"] = "sql_only"
+        state["sql_filters"] = {}
+        state["answer"] = "Understood. I won't continue with that clarification. Ask a new question whenever you're ready."
+        print("   ↪️ Interpreted reply as clarification cancellation")
+        return state
     
     # ============= QUERY ANALYSIS PROMPT =============
     analysis_prompt = ChatPromptTemplate.from_messages(
@@ -3127,6 +3196,11 @@ def generate_answer_node(state: AgentState) -> AgentState:
         state["answer"] = "Hello! I'm here to help you with your resume-related queries."
         return state
 
+    if analysis.get("query_type") == "clarification_declined":
+        if not state.get("answer"):
+            state["answer"] = "Understood. I won't continue with that clarification. Ask a new question whenever you're ready."
+        return state
+
     if analysis.get("is_jd_match_query", False) or analysis.get("query_type") == "jd_match":
         jd_info = state.get("selected_jd", {})
         ranked = state.get("jd_match_results", [])
@@ -3639,6 +3713,9 @@ def create_intelligent_agent() -> StateGraph:
         # JD info query (asking about the JD itself)
         if analysis.get("is_jd_info_query", False) or analysis.get("query_type") == "jd_info":
             return "jd_info"
+
+        if analysis.get("query_type") == "clarification_declined":
+            return "generate_answer"
 
         if tool_action:
             needs_search = tool_action.get("needs_candidate_search", False)

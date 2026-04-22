@@ -4,6 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 import os
 import json
+import re
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI            
@@ -35,6 +36,60 @@ llm_gemini = ChatGoogleGenerativeAI(
 
 # Use OpenAI as default
 llm = llm_openai
+
+
+def _extract_company_filter_from_query(query: str) -> str | None:
+    """Extract a likely company constraint from queries like 'work experience at WhiteHat Jr'."""
+    query_text = query or ""
+    patterns = [
+        r"\bat\s+([A-Za-z][A-Za-z0-9&.,\- ]{1,60})",
+        r"\bwith\s+([A-Za-z][A-Za-z0-9&.,\- ]{1,60})",
+    ]
+    split_pattern = r"(?:\?|\.|,|\bfor\b|\bwho\b|\bthat\b|\bhaving\b|\bwhere\b)"
+    for pattern in patterns:
+        match = re.search(pattern, query_text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        raw_value = match.group(1).strip()
+        cleaned = re.split(split_pattern, raw_value, maxsplit=1)[0].strip(" .,'\"")
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _filter_work_experience_for_query(resume_data: dict, query: str) -> dict:
+    """Limit work experience to the requested company so answers stay on-point."""
+    query_lower = (query or "").lower()
+    if not any(token in query_lower for token in ["work experience", "work ex", "worked", "experience", "role"]):
+        return resume_data
+
+    company_filter = _extract_company_filter_from_query(query)
+    if not company_filter:
+        return resume_data
+
+    work_items = _safe_json_list(resume_data.get("work_experience"))
+    if not work_items:
+        return resume_data
+
+    company_filter_lower = company_filter.lower()
+    filtered_items = []
+    for item in work_items:
+        if not isinstance(item, dict):
+            continue
+        haystack = " ".join(
+            str(item.get(key, "")) for key in ["company", "role", "duration", "responsibilities"]
+        ).lower()
+        if company_filter_lower in haystack:
+            filtered_items.append(item)
+
+    if not filtered_items:
+        return resume_data
+
+    filtered_resume = dict(resume_data)
+    filtered_resume["work_experience"] = json.dumps(filtered_items)
+    # Avoid giving the model unrelated raw text when the user asked about a single company stint.
+    filtered_resume["raw_text"] = None
+    return filtered_resume
 
 
 def generate_compact_list(search_results: list, query: str) -> str:
@@ -330,10 +385,14 @@ def generate_answer(query: str, search_results: list, conversation_history: list
     # ✅ LIST ALL mode: Provide compact summary of ALL candidates
     if format_as_list:
         return generate_compact_list(search_results, query)
+
+    search_results_for_query = [
+        _filter_work_experience_for_query(resume, query) for resume in search_results
+    ]
     
     # ✅ Smart decision: Include full raw_text ONLY for specific queries (1-2 candidates)
     # For broader searches (3+ candidates), rely on structured fields + matched_chunks
-    include_full_text = len(search_results) <= 2
+    include_full_text = len(search_results_for_query) <= 2
     
     if include_full_text:
         print(f"   📋 Including FULL resume text for {len(search_results)} candidate(s)")
@@ -341,8 +400,8 @@ def generate_answer(query: str, search_results: list, conversation_history: list
         print(f"   📋 Using structured fields only for {len(search_results)} candidates")
     
     context_parts = []
-    for i, resume in enumerate(search_results, 1):
-        formatted = format_resume_for_context(resume, include_full_text=include_full_text)
+    for i, resume_for_query in enumerate(search_results_for_query, 1):
+        formatted = format_resume_for_context(resume_for_query, include_full_text=include_full_text and resume_for_query.get("raw_text") is not None)
         context_parts.append(f"\n--- Candidate {i} ---\n{formatted}")
     
     context = "\n".join(context_parts)
@@ -486,10 +545,10 @@ Please provide a helpful answer based on these candidates.""")
                     })
                 else:
                     print(f"   ⚠️  Groq fallback failed: {groq_error}")
-                    return _generate_rule_based_answer(query, search_results, dropped_filters)
+                    return _generate_rule_based_answer(query, search_results_for_query, dropped_filters)
         else:
             print(f"   ⚠️  LLM answer generation unavailable: {e}")
-            return _generate_rule_based_answer(query, search_results, dropped_filters)
+            return _generate_rule_based_answer(query, search_results_for_query, dropped_filters)
     
     return answer
 

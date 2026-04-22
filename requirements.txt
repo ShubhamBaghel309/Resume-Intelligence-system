@@ -37,3 +37,6 @@ python-dateutil>=2.8.2
 fastmcp>=0.2.0
 openai>=1.0.0
 mcp>=0.9.0
+
+# Optional Developer / Utility Script Support
+ipython>=8.0.0
